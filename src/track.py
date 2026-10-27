@@ -51,6 +51,13 @@ BALL_LINK_BONUS = 0.15      # 動きとして自然につながる候補への�
 BALL_CONF_OFFSET = 0.15     # 信頼度からこれを引いた値が候補の得点（つながりのない低信頼の候補は採用されない）
 BALL_JUMP_PENALTY = 0.5     # つながらない位置へ飛ぶ（見失い→再発見）ときの減点
 BALL_STATIC_PX = 2.0        # 実時間1フレームあたりこれ未満しか動かない候補のつながりは加点しない（ペナルティスポット等の誤検出対策）
+BALL_STATIC_YD = 0.05       # 同上をピッチ座標で判定する場合（カメラが動いても止まっている物を見分けられる）
+
+# ---- ピッチ上の白い点（ペナルティマーク・センターマーク）の誤検出除去 ----
+# 2D座標がわかるフレームでは、ボール候補をピッチ座標に変換し、マークの近くにある候補を捨てる
+PITCH_SPOTS = [(108, 40), (12, 40), (60, 40)]   # ペナルティマーク（両側）とセンターマーク（StatsBomb座標）
+BALL_SPOT_RADIUS_YD = 1.0   # マークからこの距離以内の候補を捨てる
+BALL_SPOT_KEEP_CONF = 0.6   # ただし信頼度がこれ以上なら残す（PK でマーク上に置かれた本物のボール用）
 
 # ---- ボールの弾道フィット（全フレーム処理後にまとめて実行）----
 BALL_FIT_TOL_PX = 6.0   # 弾道（2次式）の予測からこれ以上外れたら、キック・バウンド・誤検出のどれか
@@ -305,13 +312,31 @@ def quadratic_predict(pts, f):
     return float(np.polyval(cx, tf)), float(np.polyval(cy, tf))
 
 
+def filter_ball_candidates(cands, H_img2pitch):
+    """ボール候補にピッチ座標を付け、ペナルティマーク・センターマークの上にある低信頼の候補を捨てる。
+    戻り値: [(x, y, size, conf, pitch_x, pitch_y), ...]（2D座標がないフレームでは pitch は None）"""
+    if not cands:
+        return []
+    if H_img2pitch is None:
+        return [(*c, None, None) for c in cands]
+    pts = np.float32([[c[0], c[1]] for c in cands]).reshape(-1, 1, 2)
+    pxy = cv2.perspectiveTransform(pts, H_img2pitch).reshape(-1, 2)
+    out = []
+    for c, (px, py) in zip(cands, pxy):
+        near_spot = any(np.hypot(px - sx, py - sy) <= BALL_SPOT_RADIUS_YD for sx, sy in PITCH_SPOTS)
+        if near_spot and c[3] < BALL_SPOT_KEEP_CONF:
+            continue
+        out.append((*c, float(px), float(py)))
+    return out
+
+
 def select_ball_path(cands_per_frame):
     """全フレームのボール候補から、動きとして一番もっともらしい経路を動的計画法で選ぶ。
     オンライン追跡と違い、予測が外れても「その後に映っているボール」を取りこぼさない。
     - 候補の得点: 信頼度 - BALL_CONF_OFFSET
     - 前の候補から自然な速さでつながれば BALL_LINK_BONUS を加点（間隔が空くほど減点）
     - つながらない位置への移動は BALL_JUMP_PENALTY を払えば常に可能（見失い→再発見）
-    cands_per_frame: {frame: [(x, y, size, conf), ...]}
+    cands_per_frame: {frame: [(x, y, size, conf, pitch_x, pitch_y), ...]}
     戻り値: 選ばれた候補 [(frame, x, y, size), ...]"""
     max_gap = BALL_LINK_GAP * SLOWDOWN
     nodes = []
@@ -344,9 +369,13 @@ def select_ball_path(cands_per_frame):
                 dist = np.hypot(cj[0] - ck[0], cj[1] - ck[1])
                 if dist <= BALL_MAX_SPEED_PX * max(gap_real, 1 / SLOWDOWN):
                     speed = dist / max(gap_real, 1e-6)
-                    # 止まっている物（ペナルティスポット、白いソックス等）が毎フレーム続けて検出されても得をしないよう、
-                    # ほぼ動いていないつながりには加点しない
-                    moving = min(1.0, speed / BALL_STATIC_PX)
+                    # 止まっている物（白いソックス、ピッチ上の白い汚れ等）が毎フレーム続けて検出されても得をしないよう、
+                    # ほぼ動いていないつながりには加点しない。2D座標があればピッチ上で判定する
+                    # （画像上だとカメラのパンで止まっている物も動いて見えるため）
+                    if cj[4] is not None and ck[4] is not None:
+                        moving = min(1.0, np.hypot(cj[4] - ck[4], cj[5] - ck[5]) / max(gap_real, 1e-6) / BALL_STATIC_YD)
+                    else:
+                        moving = min(1.0, speed / BALL_STATIC_PX)
                     link = BALL_LINK_BONUS * moving - 0.02 * max(gap_real - 1, 0) - 0.05 * speed / BALL_MAX_SPEED_PX
                     s = dp[k] + emit + link
                     if s > score:
@@ -829,9 +858,9 @@ def process_video(input_path, output_path):
         near = pred is not None and any(np.hypot(c[0] - pred[0], c[1] - pred[1]) <= ball_tracker.gate() for c in cands)
         if pred is not None and not near:
             cands += search_ball_roi(model, frame, pred)
-        cands = merge_candidates(cands)
+        cands = filter_ball_candidates(merge_candidates(cands), H_for_2d)
         # オンライン追跡は、予測位置の切り出し探索を当てるためだけに使う。採否は全フレーム後に経路選択で決める
-        ball_tracker.update(pred, cands)
+        ball_tracker.update(pred, [c[:4] for c in cands])
         if cands:
             ball_cands[frame_idx] = cands
 
