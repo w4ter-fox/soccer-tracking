@@ -33,11 +33,24 @@ BALL_GATE_PX = 80       # 予測位置からこの距離（px）以内の候補�
 BALL_MAX_MISSES = 12    # 実時間換算で何フレーム見失ったら追跡をやめるか
 BALL_ROI = 320          # 全体で見つからないとき、予測位置の周りをこの大きさ（px）で切り出し拡大して再検出
 BALL_TRAIL = 15         # ボールの軌跡を描くフレーム数
+# 画面を BALL_TILES×BALL_TILES に分割し、各タイルを拡大してボールだけ探す（0で無効）
+# 2なら推論が5回/フレームになり遅くなるが、小さいボールの検出率が上がる
+BALL_TILES = 2
+BALL_TILE_OVERLAP = 0.2
 
 # ---- スロー化した入力 ----
 # 入力動画が実時間の何倍に引き伸ばされているか（0.25倍速なら 4、通常の動画なら 1）
 # 推論は全フレームで行い、出力動画は SLOWDOWN フレームごとに1枚書き出して1倍速に戻す
 SLOWDOWN = 4
+
+# ---- ボールの経路選択（全フレームの候補から、もっともらしい1本の経路を選ぶ）----
+BALL_KEEP_TOPK = 5          # フレームごとに残す候補数（信頼度順）
+BALL_MAX_SPEED_PX = 60      # 実時間1フレームあたりの最大移動量（px）。これより速い移動は同じボールとみなさない
+BALL_LINK_GAP = 8           # 候補同士をつなげる最大の間隔（実時間換算のフレーム数）
+BALL_LINK_BONUS = 0.15      # 動きとして自然につながる候補への加点（低信頼でも軌道上なら採用されやすくする）
+BALL_CONF_OFFSET = 0.15     # 信頼度からこれを引いた値が候補の得点（つながりのない低信頼の候補は採用されない）
+BALL_JUMP_PENALTY = 0.5     # つながらない位置へ飛ぶ（見失い→再発見）ときの減点
+BALL_STATIC_PX = 2.0        # 実時間1フレームあたりこれ未満しか動かない候補のつながりは加点しない（ペナルティスポット等の誤検出対策）
 
 # ---- ボールの弾道フィット（全フレーム処理後にまとめて実行）----
 BALL_FIT_TOL_PX = 6.0   # 弾道（2次式）の予測からこれ以上外れたら、キック・バウンド・誤検出のどれか
@@ -48,7 +61,8 @@ BALL_SEG_MAX_GAP = 8    # 検出の間がこのフレーム数（実時間換算
 OUTPUT_CRF = 18         # H.264の画質（小さいほど高画質。18でほぼ劣化なし）
 
 # 内部クラスID（ラベルには出さない。ボックス色の決定にだけ使う）
-TEAM_WHITE, TEAM_BLUE, REFEREE, GOALKEEPER, BALL = 0, 1, 2, 3, 4
+TEAM_WHITE, TEAM_BLUE, REFEREE, GOALKEEPER, BALL, UNKNOWN = 0, 1, 2, 3, 4, 5
+TEAM_NAMES = {"white": TEAM_WHITE, "blue": TEAM_BLUE, "referee": REFEREE, "gk": GOALKEEPER}
 
 # クラスID順のボックス色（RGB）
 BOX_PALETTE = sv.ColorPalette(colors=[
@@ -57,13 +71,19 @@ BOX_PALETTE = sv.ColorPalette(colors=[
     sv.Color(r=255, g=215, b=0),    # 2: 審判（黄）
     sv.Color(r=0,   g=200, b=80),   # 3: GK（緑）
     sv.Color(r=255, g=140, b=0),    # 4: ボール（オレンジ）
+    sv.Color(r=150, g=150, b=150),  # 5: 判定できない（灰）
 ])
 BALL_BGR = (0, 140, 255)
 
 # GK判定に必要な胴体の緑ピクセル比率（芝の写り込みとの区別用）
 GK_GREEN_RATIO = 0.4
-# クラス多数決に使う直近フレーム数
-VOTE_WINDOW = 30
+# ---- チームの決定（全フレーム処理後にトラック単位で行う）----
+# チームは試合中に変わらないので、トラックIDごとに全フレームの色判定を集計して1つに決める
+TEAM_MIN_VOTES = 8        # 自分の色判定だけで決めるのに必要な判定数（実時間換算のフレーム数）
+TEAM_MIN_SHARE = 0.6      # 最多の色が全判定に占める割合がこれ以上なら確定
+TEAM_INHERIT_GAP_S = 1.5  # 判定が足りないトラックは、この秒数以内に近くで途切れたトラックのチームを引き継ぐ
+TEAM_INHERIT_DIST_YD = 5  # 引き継ぐ距離の上限（2D座標がある場合、ヤード）
+TEAM_INHERIT_DIST_BOX = 1.5  # 引き継ぐ距離の上限（2D座標がない場合、箱の高さの何倍か）
 
 # カメラがパン・ズームする映像なら True（フレーム間の動きを推定してホモグラフィを更新する）
 # 固定カメラなら False（キーポイントを取ったフレームのホモグラフィをそのまま使う）
@@ -214,7 +234,7 @@ class BallTracker:
             return None
         p = self.kf.predict()
         pred = (float(p[0, 0]), float(p[1, 0]))
-        if len(self.recent) >= 4:
+        if len(self.recent) >= 4 and frame_idx - self.recent[-1][0] <= 3 * SLOWDOWN:
             q = quadratic_predict(list(self.recent), frame_idx)
             if q is not None:
                 pred = q
@@ -244,6 +264,13 @@ class BallTracker:
             k = int(np.argmin(d))
             if d[k] <= self.gate():
                 best = cands[k]
+        if best is None:
+            # 予測が外れている（キックで向きが変わった等）ときに、映っているボールを無視し続けないよう
+            # 予測から遠くても信頼度の高い候補があれば、そこで追跡をやり直す
+            strong = [c for c in cands if c[3] >= BALL_INIT_CONF]
+            if strong:
+                self.active = False
+                return self.update(None, strong)
         if best is not None:
             cx, cy, size, _ = best
             self.kf.correct(np.array([[cx], [cy]], np.float32))
@@ -276,6 +303,64 @@ def quadratic_predict(pts, f):
         return None
     tf = f - a[-1, 0]
     return float(np.polyval(cx, tf)), float(np.polyval(cy, tf))
+
+
+def select_ball_path(cands_per_frame):
+    """全フレームのボール候補から、動きとして一番もっともらしい経路を動的計画法で選ぶ。
+    オンライン追跡と違い、予測が外れても「その後に映っているボール」を取りこぼさない。
+    - 候補の得点: 信頼度 - BALL_CONF_OFFSET
+    - 前の候補から自然な速さでつながれば BALL_LINK_BONUS を加点（間隔が空くほど減点）
+    - つながらない位置への移動は BALL_JUMP_PENALTY を払えば常に可能（見失い→再発見）
+    cands_per_frame: {frame: [(x, y, size, conf), ...]}
+    戻り値: 選ばれた候補 [(frame, x, y, size), ...]"""
+    max_gap = BALL_LINK_GAP * SLOWDOWN
+    nodes = []
+    for f in sorted(cands_per_frame):
+        for c in sorted(cands_per_frame[f], key=lambda c: -c[3])[:BALL_KEEP_TOPK]:
+            nodes.append((f, c))
+    if not nodes:
+        return []
+    n = len(nodes)
+    dp = np.full(n, -np.inf)
+    prev = np.full(n, -1)
+    best_before = []          # (frame, これまでの最高得点, そのノード)
+    run_best, run_idx = -np.inf, -1
+    i0 = 0                    # 前のフレームまでのノードの開始位置
+    for j, (fj, cj) in enumerate(nodes):
+        # 前のフレームまでの最高得点を更新（同じフレーム内のノードからは飛べない）
+        while i0 < j and nodes[i0][0] < fj:
+            if dp[i0] > run_best:
+                run_best, run_idx = dp[i0], i0
+            i0 += 1
+        emit = cj[3] - BALL_CONF_OFFSET
+        score, p = emit, -1                                   # ここから新しく始める
+        if run_idx >= 0 and run_best - BALL_JUMP_PENALTY + emit > score:
+            score, p = run_best - BALL_JUMP_PENALTY + emit, run_idx   # 見失い→再発見
+        k = j - 1
+        while k >= 0 and fj - nodes[k][0] <= max_gap:
+            fk, ck = nodes[k]
+            if fk < fj:
+                gap_real = (fj - fk) / SLOWDOWN
+                dist = np.hypot(cj[0] - ck[0], cj[1] - ck[1])
+                if dist <= BALL_MAX_SPEED_PX * max(gap_real, 1 / SLOWDOWN):
+                    speed = dist / max(gap_real, 1e-6)
+                    # 止まっている物（ペナルティスポット、白いソックス等）が毎フレーム続けて検出されても得をしないよう、
+                    # ほぼ動いていないつながりには加点しない
+                    moving = min(1.0, speed / BALL_STATIC_PX)
+                    link = BALL_LINK_BONUS * moving - 0.02 * max(gap_real - 1, 0) - 0.05 * speed / BALL_MAX_SPEED_PX
+                    s = dp[k] + emit + link
+                    if s > score:
+                        score, p = s, k
+            k -= 1
+        dp[j], prev[j] = score, p
+    # 最高得点のノードから逆にたどる
+    j = int(np.argmax(dp))
+    path = []
+    while j >= 0:
+        f, c = nodes[j]
+        path.append((f, c[0], c[1], c[2]))
+        j = prev[j]
+    return path[::-1]
 
 
 def fit_ball_trajectory(obs):
@@ -350,6 +435,31 @@ def ball_candidates(boxes, confs, offset=(0, 0)):
     ox, oy = offset
     return [((b[0] + b[2]) / 2 + ox, (b[1] + b[3]) / 2 + oy, max(b[2] - b[0], b[3] - b[1]), float(c))
             for b, c in zip(boxes, confs)]
+
+
+def detect_ball_tiled(model, frame):
+    """画面をタイルに分割して拡大推論し、ボールの候補を返す（遠く小さいボールの見逃し対策）"""
+    if BALL_TILES < 2:
+        return []
+    h, w = frame.shape[:2]
+    th, tw = int(h / BALL_TILES * (1 + BALL_TILE_OVERLAP)), int(w / BALL_TILES * (1 + BALL_TILE_OVERLAP))
+    ys = np.linspace(0, h - th, BALL_TILES).astype(int)
+    xs = np.linspace(0, w - tw, BALL_TILES).astype(int)
+    tiles = [(x0, y0, frame[y0:y0 + th, x0:x0 + tw]) for y0 in ys for x0 in xs]
+    results = model([t[2] for t in tiles], imgsz=IMGSZ, conf=BALL_CONF, classes=[32], verbose=False)
+    cands = []
+    for (x0, y0, _), r in zip(tiles, results):
+        cands += ball_candidates(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy(), offset=(x0, y0))
+    return cands
+
+
+def merge_candidates(cands, dist_px=8):
+    """全体推論・タイル推論・切り出し推論で重複した候補を、信頼度の高い方に1つにまとめる"""
+    out = []
+    for c in sorted(cands, key=lambda c: -c[3]):
+        if all(np.hypot(c[0] - o[0], c[1] - o[1]) > dist_px for o in out):
+            out.append(c)
+    return out
 
 
 def search_ball_roi(model, frame, center):
@@ -529,6 +639,73 @@ def is_scene_cut(prev_hist, frame, threshold=0.5):
     return cut, hist
 
 
+def resolve_teams(votes, spans, real_fps):
+    """トラックIDごとのチームを決める。
+    1. 重なっていないフレームの色判定が十分あり、最多の色が十分多ければ、それで確定
+    2. 足りなければ、直前に近くで途切れた（または直後に近くで始まった）トラックのチームを引き継ぐ
+    3. それもなければ自分の少ない判定の最多、判定が1つもなければ UNKNOWN
+    戻り値: {tid: (team, source)}  source は "votes" / "inherited" / "weak" / "unknown" """
+    team = {}
+    for tid, c in votes.items():
+        n = sum(c.values())
+        if n == 0:
+            continue
+        best, cnt = c.most_common(1)[0]
+        if n >= TEAM_MIN_VOTES * SLOWDOWN and cnt / n >= TEAM_MIN_SHARE:
+            team[tid] = (best, "votes")
+
+    max_gap = int(TEAM_INHERIT_GAP_S * real_fps)
+
+    def distance(a, b):
+        """a の終わり（または始まり）と b の位置の距離が閾値以内か、と距離を返す"""
+        if a["pitch"] is not None and b["pitch"] is not None:
+            d = float(np.hypot(*(np.subtract(a["pitch"], b["pitch"]))))
+            return d, d <= TEAM_INHERIT_DIST_YD
+        d = float(np.hypot(*(np.subtract(a["img"], b["img"]))))
+        return d, d <= TEAM_INHERIT_DIST_BOX * max(a["h"], b["h"])
+
+    for tid in sorted(spans, key=lambda k: spans[k]["f0"]):
+        if tid in team:
+            continue
+        s = spans[tid]
+        cands = []
+        for oid, o in spans.items():
+            if oid == tid or oid not in team:
+                continue
+            if 0 < s["f0"] - o["f1"] <= max_gap:        # 直前に途切れたトラック
+                d, ok = distance(o["end"], s["start"])
+            elif 0 < o["f0"] - s["f1"] <= max_gap:      # 直後に始まったトラック
+                d, ok = distance(s["end"], o["start"])
+            else:
+                continue
+            if ok:
+                cands.append((d, oid))
+        if cands:
+            team[tid] = (team[min(cands)[1]][0], "inherited")
+        elif sum(votes.get(tid, Counter()).values()) > 0:
+            team[tid] = (votes[tid].most_common(1)[0][0], "weak")
+        else:
+            team[tid] = (UNKNOWN, "unknown")
+    return team
+
+
+def load_team_overrides(base):
+    """<name>_teams.json があれば、人手で付けたチームで上書きする。形式: {"12": "blue", "7": "white", ...}"""
+    path = base + "_teams.json"
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    out = {}
+    for k, v in raw.items():
+        if v in TEAM_NAMES:
+            out[int(k)] = TEAM_NAMES[v]
+        else:
+            print(f"  警告: {os.path.basename(path)} の {k}: {v!r} は不明なチーム名（white/blue/referee/gk）")
+    print(f"  {os.path.basename(path)} から {len(out)} 件のチームを上書きします。")
+    return out
+
+
 def process_video(input_path, output_path):
     print(f"\n処理開始: {os.path.basename(input_path)}")
     model = YOLO(MODEL_NAME)
@@ -539,8 +716,9 @@ def process_video(input_path, output_path):
     tracker = ByteTrackTracker(frame_rate=real_fps, lost_track_buffer=int(real_fps * 2))
     ball_tracker = BallTracker()
 
-    # トラッカーIDごとのクラス履歴（フレームごとの色判定のチラつきを多数決で抑える）
-    class_history = defaultdict(lambda: deque(maxlen=VOTE_WINDOW * SLOWDOWN))
+    # トラックIDごとの色判定の集計と、トラックの始まり・終わりの位置
+    team_votes = defaultdict(Counter)
+    spans = {}
 
     kp = load_homography(input_path)
     H_ref = kp["H"] if kp else None
@@ -553,8 +731,8 @@ def process_video(input_path, output_path):
     n_refined, n_lost_frames = 0, 0
 
     # 1パス目の結果をフレームごとに保存し、ボールの弾道フィット後に2パス目で描画・記録する
-    per_frame = []      # (persons, tracker_ids, H_for_2d, h_score)
-    ball_obs = []       # ボールの実測 (frame, x, y, size)
+    per_frame = []      # (xyxy, tracker_ids, H_for_2d, h_score)
+    ball_cands = {}     # フレームごとのボール候補 [(x, y, size, conf), ...]
 
     print(f"  1/2 推論とトラッキング（{video_info.total_frames} フレーム, 実時間 {video_info.total_frames / real_fps:.1f} 秒）...")
     for frame_idx, frame in enumerate(sv.get_video_frames_generator(input_path)):
@@ -622,43 +800,61 @@ def process_video(input_path, output_path):
         persons.data["occluded"] = occlusion_flags(persons.xyxy)
         persons = tracker.update(persons)
 
-        # 確定したトラッカーIDは直近フレームの多数決でクラス（=ボックス色）を決める
-        # 他の選手と重なっているフレームの色判定は、隣の選手の色が混ざるので履歴に入れない
+        # 色判定はトラックIDごとに集計だけしておき、チームは全フレーム処理後にトラック単位で決める
+        # 他の選手と重なっているフレームの色判定は、隣の選手の色が混ざるので数えない
         tracker_ids = persons.tracker_id if persons.tracker_id is not None else np.full(len(persons), -1)
         occluded = persons.data.get("occluded", np.zeros(len(persons), dtype=bool))
-        voted = persons.class_id.copy()
-        for k, (cid, tid) in enumerate(zip(persons.class_id, tracker_ids)):
-            if tid < 0:
-                continue
-            hist = class_history[int(tid)]
-            if not occluded[k] or len(hist) == 0:
-                hist.append(int(cid))
-            voted[k] = Counter(hist).most_common(1)[0][0]
-        persons.class_id = voted
+        confirmed = tracker_ids >= 0
+        xyxy_c, tids_c = persons.xyxy[confirmed].copy(), tracker_ids[confirmed].copy()
+        for box, cid, tid, occ in zip(xyxy_c, persons.class_id[confirmed], tids_c, occluded[confirmed]):
+            tid = int(tid)
+            if not occ:
+                team_votes[tid][int(cid)] += 1
+            foot = ((box[0] + box[2]) / 2, box[3])
+            pitch = None
+            if H_for_2d is not None:
+                pitch = tuple(cv2.perspectiveTransform(np.float32([[foot]]), H_for_2d)[0, 0])
+            pos = {"img": foot, "pitch": pitch, "h": float(box[3] - box[1])}
+            if tid not in spans:
+                spans[tid] = {"f0": frame_idx, "start": pos}
+            spans[tid]["f1"], spans[tid]["end"] = frame_idx, pos
 
         # 表示と記録はIDが確定した選手だけ（低信頼の検出は追跡の継続にだけ使う）
-        confirmed = tracker_ids >= 0
-        per_frame.append((persons.xyxy[confirmed].copy(), persons.class_id[confirmed].copy(),
-                          tracker_ids[confirmed].copy(), H_for_2d, h_score))
+        per_frame.append((xyxy_c, tids_c, H_for_2d, h_score))
 
         # ---- ボール（オンラインでは見失い対策の探索と候補選びだけ行う）----
         pred = ball_tracker.predict(frame_idx)
         balls = raw[raw.class_id == 32]
-        cands = ball_candidates(balls.xyxy, balls.confidence)
+        cands = ball_candidates(balls.xyxy, balls.confidence) + detect_ball_tiled(model, frame)
         near = pred is not None and any(np.hypot(c[0] - pred[0], c[1] - pred[1]) <= ball_tracker.gate() for c in cands)
         if pred is not None and not near:
             cands += search_ball_roi(model, frame, pred)
-        ball = ball_tracker.update(pred, cands)
-        if ball is not None and not ball[3]:
-            ball_obs.append((frame_idx, ball[0], ball[1], ball[2]))
+        cands = merge_candidates(cands)
+        # オンライン追跡は、予測位置の切り出し探索を当てるためだけに使う。採否は全フレーム後に経路選択で決める
+        ball_tracker.update(pred, cands)
+        if cands:
+            ball_cands[frame_idx] = cands
 
     if refiner is not None:
         print(f"  白線による補正: {n_refined} 回採用 / 位置合わせを見失っていたフレーム: {n_lost_frames}")
 
-    # ---- ボールの弾道フィット ----
+    # ---- チームの決定 ----
+    base = os.path.splitext(input_path)[0]
+    team_of = resolve_teams(team_votes, spans, real_fps)
+    for tid, team in load_team_overrides(base).items():
+        if tid in spans:
+            team_of[tid] = (team, "manual")
+    src_count = Counter(s for _, s in team_of.values())
+    print(f"  チーム: {len(team_of)} トラック（色判定で確定 {src_count['votes']} / 引き継ぎ {src_count['inherited']} / "
+          f"判定少 {src_count['weak']} / 不明 {src_count['unknown']} / 手動 {src_count['manual']}）")
+
+    # ---- ボールの経路選択と弾道フィット ----
+    ball_obs = select_ball_path(ball_cands)
     ball_fit = fit_ball_trajectory(ball_obs)
     n_fit = sum(1 for v in ball_fit.values() if v[3] == "fit")
-    print(f"  ボール: 実測 {len(ball_obs)} フレーム → 弾道で補完後 {len(ball_fit)} フレーム（うち2次式フィット {n_fit}）")
+    n_total = len(per_frame)
+    print(f"  ボール: 実測 {len(ball_obs)}/{n_total} フレーム（{100 * len(ball_obs) / max(n_total, 1):.0f}%）"
+          f" → 弾道で補完後 {len(ball_fit)} フレーム（{100 * len(ball_fit) / max(n_total, 1):.0f}%、うち2次式フィット {n_fit}）")
 
     # ---- 2パス目: 描画（1倍速に戻す）と2D座標の記録 ----
     print("  2/2 描画と2D座標の記録...")
@@ -670,7 +866,9 @@ def process_video(input_path, output_path):
         for frame_idx, frame in enumerate(sv.get_video_frames_generator(input_path)):
             if frame_idx >= len(per_frame):
                 break
-            xyxy, cls, tids, H_for_2d, score = per_frame[frame_idx]
+            xyxy, tids, H_for_2d, score = per_frame[frame_idx]
+            cls = np.array([team_of.get(int(t), (UNKNOWN, "unknown"))[0] for t in tids], dtype=int)
+            src = [team_of.get(int(t), (UNKNOWN, "unknown"))[1] for t in tids]
             ball = ball_fit.get(frame_idx)
             t_sec = frame_idx / real_fps
 
@@ -678,15 +876,17 @@ def process_video(input_path, output_path):
                 if len(xyxy) > 0:
                     feet = np.c_[(xyxy[:, 0] + xyxy[:, 2]) / 2, xyxy[:, 3]].astype(np.float32)
                     pxy = cv2.perspectiveTransform(feet.reshape(-1, 1, 2), H_for_2d).reshape(-1, 2)
-                    for (px, py), (ix, iy), cid, tid in zip(pxy, feet, cls, tids):
+                    for (px, py), (ix, iy), cid, tid, s in zip(pxy, feet, cls, tids, src):
                         records.append({"frame": frame_idx, "time_s": t_sec, "tracker_id": int(tid),
-                                        "class_id": int(cid), "image_x": float(ix), "image_y": float(iy),
+                                        "class_id": int(cid), "team_source": s,
+                                        "image_x": float(ix), "image_y": float(iy),
                                         "pitch_x": float(px), "pitch_y": float(py), "ball_kind": "",
                                         "h_score": score})
                 if ball is not None:
                     bx, by, _, kind = ball
                     px, py = cv2.perspectiveTransform(np.float32([[[bx, by]]]), H_for_2d)[0, 0]
                     records.append({"frame": frame_idx, "time_s": t_sec, "tracker_id": -1, "class_id": BALL,
+                                    "team_source": "",
                                     "image_x": float(bx), "image_y": float(by),
                                     "pitch_x": float(px), "pitch_y": float(py), "ball_kind": kind,
                                     "h_score": score})
@@ -712,16 +912,19 @@ def process_video(input_path, output_path):
 
     print(f"  完了！ {os.path.basename(output_path)} を保存しました（1倍速）。")
 
-    base = os.path.splitext(input_path)[0]
     with open(base + "_meta.json", "w") as f:
         json.dump({"file_fps": fps, "slowdown": SLOWDOWN, "real_fps": real_fps}, f)
+    tracks = [{"tracker_id": tid, "team": next(k for k, v in TEAM_NAMES.items() if v == team) if team in TEAM_NAMES.values() else "unknown",
+               "source": s, "start_frame": spans[tid]["f0"], "end_frame": spans[tid]["f1"],
+               "votes": dict(team_votes.get(tid, {}))} for tid, (team, s) in sorted(team_of.items())]
+    pd.DataFrame(tracks).to_csv(base + "_tracks.csv", index=False)
     if records:
         pd.DataFrame(records).to_csv(base + "_positions.csv", index=False)
         print(f"  2D座標: {os.path.basename(base)}_positions.csv を保存しました（{len(records)} 行）。")
 
 
 def main():
-    global BASE_DIR, VIDEO_FILES, MODEL_NAME, IMGSZ, SLOWDOWN, CAMERA_MOVES, DEBUG_OVERLAY
+    global BASE_DIR, VIDEO_FILES, MODEL_NAME, IMGSZ, SLOWDOWN, CAMERA_MOVES, DEBUG_OVERLAY, BALL_TILES
     ap = argparse.ArgumentParser(description="選手・ボールのトラッキングと2D座標の出力")
     ap.add_argument("videos", nargs="*", help="動画ファイル名（省略時は VIDEO_FILES）")
     ap.add_argument("--data-dir", default=BASE_DIR)
@@ -730,12 +933,14 @@ def main():
     ap.add_argument("--slowdown", type=int, default=SLOWDOWN, help="入力が実時間の何倍にスロー化されているか")
     ap.add_argument("--fixed-camera", action="store_true", help="固定カメラ（動き推定と白線補正を行わない）")
     ap.add_argument("--debug-overlay", action="store_true", help="推定中のピッチのラインを重ねる")
+    ap.add_argument("--ball-tiles", type=int, default=BALL_TILES, help="ボール用のタイル分割数（0で無効、2で2×2）")
     args = ap.parse_args()
     BASE_DIR = os.path.abspath(args.data_dir)
     if args.videos:
         VIDEO_FILES = args.videos
     MODEL_NAME, IMGSZ, SLOWDOWN = args.model, args.imgsz, args.slowdown
     CAMERA_MOVES, DEBUG_OVERLAY = not args.fixed_camera, args.debug_overlay
+    BALL_TILES = args.ball_tiles
 
     for filename in VIDEO_FILES:
         input_path = os.path.join(BASE_DIR, filename)

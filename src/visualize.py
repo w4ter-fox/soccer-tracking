@@ -44,6 +44,7 @@ STYLE = {
     2: ("#ffd700", "black", "Referee"),
     3: ("#00c850", "black", "Goalkeeper"),
     4: ("#ff8c00", "black", "Ball"),
+    5: ("#969696", "black", "Unknown"),
 }
 
 # 選手は同じトラッカーIDの中で移動平均をかける（ボールはIDが不安定なのでそのまま）
