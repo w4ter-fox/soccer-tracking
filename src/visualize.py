@@ -32,9 +32,11 @@ meta_path = os.path.join(BASE_DIR, f"{name}_meta.json")
 if os.path.exists(meta_path):
     meta = json.load(open(meta_path))
     fps, slowdown = meta["file_fps"], meta["slowdown"]
+    output_step = meta.get("output_step", slowdown)
 else:
     cap = cv2.VideoCapture(os.path.join(BASE_DIR, TARGET_VIDEO))
     fps, slowdown = cap.get(cv2.CAP_PROP_FPS) or 30, 1
+    output_step = 1
     cap.release()
 
 # トラッキング動画のボックス色と合わせる（塗り, 縁）
@@ -42,7 +44,7 @@ STYLE = {
     0: ("#ffffff", "black", "Team White"),
     1: ("#1e5aff", "black", "Team Blue"),
     2: ("#ffd700", "black", "Referee"),
-    3: ("#00c850", "black", "Goalkeeper"),
+    3: ("#e61e1e", "black", "Goalkeeper"),
     4: ("#ff8c00", "black", "Ball"),
     5: ("#969696", "black", "Unknown"),
 }
@@ -113,7 +115,7 @@ if MAKE_VIDEO:
         title.set_text(f"2D Tracking - frame {frame_no}")
         return list(scatters.values()) + [title]
 
-    all_frames = range(int(frames.min()), int(frames.max()) + 1, slowdown)  # 1倍速
+    all_frames = range(int(frames.min()), int(frames.max()) + 1, output_step)  # トラッキング動画と同じ速度
     anim = animation.FuncAnimation(fig, update, frames=all_frames, blit=False)
     out_path = os.path.join(BASE_DIR, f"{name}_2d.mp4")
     anim.save(out_path, writer=animation.FFMpegWriter(fps=fps), savefig_kwargs={"facecolor": "#22312b"})
