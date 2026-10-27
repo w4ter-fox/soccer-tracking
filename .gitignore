@@ -1,0 +1,9 @@
+cat > .gitignore <<'EOF'
+data/*
+!data/.gitkeep
+.venv/
+__pycache__/
+*.pyc
+*.pt
+.ruff_cache/
+EOF
