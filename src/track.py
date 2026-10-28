@@ -100,6 +100,16 @@ JERSEY_COLORS = {
     GOALKEEPER: [((0, 110, 60), (10, 255, 255)), ((165, 110, 60), (180, 255, 255))],  # GK: 赤（肌と区別するため彩度の下限を高めに）
 }
 JERSEY_MIN_RATIO = 0.08   # どの色もこの割合に届かなければ、そのフレームの色判定はしない（票に数えない）
+# ---- 途切れたトラックのつなぎ直し（全フレーム処理後）----
+# 見失った選手が再検出されると別のIDになるので、途切れたトラックの最後の位置と速度から
+# 「そのまま進んでいたらどこにいるか」を予測し、その近くで新しく始まったトラックを同じ選手としてつなぐ
+LINK_MAX_GAP_S = 3.0      # 途切れてからこの秒数（実時間）以内に始まったトラックだけを候補にする
+LINK_VEL_WINDOW_S = 0.5   # 速度の推定に使う、途切れる直前の区間の長さ（秒）
+LINK_R0_M = 1.5           # 予測位置からの許容距離（m、2D座標がある場合）。途切れていた時間に応じて広げる
+LINK_R_PER_S_M = 2.0      # 1秒あたりに広げる許容距離（m）。向きや速さが変わった分の余裕
+LINK_R0_BOX = 1.0         # 2D座標がない場合の許容距離（箱の高さの何倍か）
+LINK_R_PER_S_BOX = 1.0
+
 # ---- チームの決定（全フレーム処理後にトラック単位で行う）----
 # チームは試合中に変わらないので、トラックIDごとに全フレームの色判定を集計して1つに決める
 TEAM_MIN_VOTES = 8        # 自分の色判定だけで決めるのに必要な判定数（実時間換算のフレーム数）
@@ -681,6 +691,77 @@ def is_scene_cut(prev_hist, frame, threshold=0.5):
     return cut, hist
 
 
+def link_tracklets(track_pts, team_votes, real_fps):
+    """途切れたトラックと、その後に始まったトラックを同じ選手としてつなぐ。
+    track_pts: {tid: [(frame, img_x, img_y, pitch_x, pitch_y, box_h), ...]}（pitch は無ければ None）
+    戻り値: {古いID: つないだ先のID（チェーンの最初のID）}"""
+    from scipy.optimize import linear_sum_assignment
+
+    max_gap = LINK_MAX_GAP_S * real_fps
+    vel_n = max(2, int(LINK_VEL_WINDOW_S * real_fps))
+
+    def team_of(tid):
+        c = team_votes.get(tid)
+        if not c or sum(c.values()) < TEAM_MIN_VOTES * SLOWDOWN:
+            return None
+        best, cnt = c.most_common(1)[0]
+        return best if cnt / sum(c.values()) >= TEAM_MIN_SHARE else None
+
+    def endpoint(pts, last):
+        """トラックの端の位置と速度（1フレームあたり）。2D座標が揃っていればピッチ座標、なければ画像座標"""
+        seg = pts[-vel_n:] if last else pts[:vel_n]
+        use_pitch = all(p[3] is not None for p in seg)
+        a = np.array([[p[0], p[3], p[4]] if use_pitch else [p[0], p[1], p[2]] for p in seg], dtype=np.float64)
+        pos = a[-1, 1:] if last else a[0, 1:]
+        vel = np.zeros(2)
+        if len(a) >= 3 and np.ptp(a[:, 0]) > 0:
+            vel = np.array([np.polyfit(a[:, 0], a[:, 1], 1)[0], np.polyfit(a[:, 0], a[:, 2], 1)[0]])
+        return pos, vel, use_pitch, float(np.median([p[5] for p in seg]))
+
+    tids = sorted(track_pts, key=lambda t: track_pts[t][0][0])
+    ends = {t: endpoint(track_pts[t], True) for t in tids}
+    starts = {t: endpoint(track_pts[t], False) for t in tids}
+    INF = 1e9
+    cost = np.full((len(tids), len(tids)), INF)
+    for i, a in enumerate(tids):
+        fa = track_pts[a][-1][0]
+        pa, va, ua, ha = ends[a]
+        for j, b in enumerate(tids):
+            fb = track_pts[b][0][0]
+            gap = fb - fa
+            if a == b or gap <= 0 or gap > max_gap:
+                continue
+            pb, vb, ub, hb = starts[b]
+            if ua != ub:                     # 片方だけ2D座標がある組み合わせは比べられない
+                continue
+            ta, tb = team_of(a), team_of(b)
+            if ta is not None and tb is not None and ta != tb:
+                continue
+            gap_s = gap / real_fps
+            # 途切れた方は前へ、始まった方は後ろへ、それぞれの速度で外挿して、真ん中の時刻で比べる
+            mid = gap / 2
+            d = np.linalg.norm((pa + va * mid) - (pb - vb * mid))
+            if ua:
+                r = LINK_R0_M + LINK_R_PER_S_M * gap_s
+            else:
+                r = (LINK_R0_BOX + LINK_R_PER_S_BOX * gap_s) * max(ha, hb)
+            if d <= r:
+                cost[i, j] = d / r + 0.1 * gap_s   # 近いほど・途切れが短いほど優先
+    rows, cols = linear_sum_assignment(np.where(cost >= INF, 1e6, cost))
+    nxt = {tids[i]: tids[j] for i, j in zip(rows, cols) if cost[i, j] < INF}
+
+    # チェーンをたどって、つながった全トラックを最初のIDにそろえる
+    prev = {b: a for a, b in nxt.items()}
+    mapping = {}
+    for t in tids:
+        root = t
+        while root in prev:
+            root = prev[root]
+        if root != t:
+            mapping[t] = root
+    return mapping
+
+
 def resolve_teams(votes, spans, real_fps):
     """トラックIDごとのチームを決める。
     1. 重なっていないフレームの色判定が十分あり、最多の色が十分多ければ、それで確定
@@ -761,6 +842,7 @@ def process_video(input_path, output_path):
     # トラックIDごとの色判定の集計と、トラックの始まり・終わりの位置
     team_votes = defaultdict(Counter)
     spans = {}
+    track_pts = defaultdict(list)   # トラックIDごとの足元の位置の履歴（つなぎ直しに使う）
 
     global PITCH_SPOTS
     base = os.path.splitext(input_path)[0]
@@ -876,6 +958,9 @@ def process_video(input_path, output_path):
             if tid not in spans:
                 spans[tid] = {"f0": frame_idx, "start": pos}
             spans[tid]["f1"], spans[tid]["end"] = frame_idx, pos
+            track_pts[tid].append((frame_idx, foot[0], foot[1],
+                                   foot_pitch[0] if foot_pitch else None, foot_pitch[1] if foot_pitch else None,
+                                   float(box[3] - box[1])))
 
         # 表示と記録はIDが確定した選手だけ（低信頼の検出は追跡の継続にだけ使う）
         per_frame.append((xyxy_c, tids_c, H_for_2d, h_score))
@@ -898,6 +983,18 @@ def process_video(input_path, output_path):
 
     # ---- チームの決定 ----
     base = os.path.splitext(input_path)[0]
+    link = link_tracklets(track_pts, team_votes, real_fps)
+    if link:
+        for old, new in link.items():
+            team_votes[new].update(team_votes.pop(old, Counter()))
+            so, sn = spans.pop(old), spans[new]
+            if so["f0"] < sn["f0"]:
+                sn["f0"], sn["start"] = so["f0"], so["start"]
+            if so["f1"] > sn["f1"]:
+                sn["f1"], sn["end"] = so["f1"], so["end"]
+        per_frame = [(xyxy, np.array([link.get(int(t), int(t)) for t in tids]), H, s)
+                     for xyxy, tids, H, s in per_frame]
+    print(f"  つなぎ直し: {len(link)} 個のトラックを前のトラックにつなげました（{len(spans)} トラックに）")
     team_of = resolve_teams(team_votes, spans, real_fps)
     for tid, team in load_team_overrides(base).items():
         if tid in spans:

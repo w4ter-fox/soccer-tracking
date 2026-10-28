@@ -16,6 +16,9 @@ ap.add_argument("video", help="動画ファイル名（例: video1.mp4）")
 ap.add_argument("--data-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"))
 ap.add_argument("--snapshot-frame", type=int, default=None)
 ap.add_argument("--no-video", action="store_true")
+ap.add_argument("--ball", choices=["none", "near", "all"], default="near",
+                help="2Dにボールをどう出すか。none: 出さない / near: 選手の近く（地面にある可能性が高い）だけ / all: 全部")
+ap.add_argument("--ball-near-m", type=float, default=2.0, help="--ball near で、選手からこの距離（m）以内のときだけ出す")
 args = ap.parse_args()
 
 BASE_DIR = os.path.abspath(args.data_dir)
@@ -65,6 +68,20 @@ if pitch_meta["units"] == "m":
     df = df[df["pitch_x"].between(-5, PL + 5) & df["pitch_y"].between(-5, PW + 5)]
 else:
     df = df[df["pitch_x"].between(55, 125) & df["pitch_y"].between(-5, 85)]
+# ボールの2D座標は、地面の平面に写しているので、浮いているボールは実際より奥に大きくずれる。
+# 選手の足元の近くにあるときは地面にある可能性が高いので、既定ではそのときだけ出す
+is_ball = df["class_id"] == 4
+if args.ball == "none":
+    df = df[~is_ball]
+elif args.ball == "near":
+    players_by_f = {f: g[["pitch_x", "pitch_y"]].to_numpy() for f, g in df[~is_ball].groupby("frame")}
+    keep = []
+    for idx, r in df[is_ball].iterrows():
+        p = players_by_f.get(r["frame"])
+        if p is not None and len(p) and np.min(np.hypot(p[:, 0] - r["pitch_x"], p[:, 1] - r["pitch_y"])) <= args.ball_near_m:
+            keep.append(idx)
+    df = pd.concat([df[~is_ball], df.loc[keep]]).sort_values(["frame", "tracker_id"])
+    print(f"ボール: 選手の {args.ball_near_m} m 以内にある {len(keep)}/{int(is_ball.sum())} フレームだけ表示")
 frames = np.sort(df["frame"].unique())
 print(f"2D座標のあるフレーム: {len(frames)}  ({frames.min()}〜{frames.max()})")
 
