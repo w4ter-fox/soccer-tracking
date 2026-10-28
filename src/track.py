@@ -3,11 +3,15 @@ import numpy as np
 from ultralytics import YOLO
 import supervision as sv
 import os
+import sys
 import json
 import subprocess
 import pandas as pd
 from collections import defaultdict, deque, Counter
 from trackers import ByteTrackTracker
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pitch
 from scipy.ndimage import map_coordinates
 from scipy.optimize import least_squares
 
@@ -758,7 +762,20 @@ def process_video(input_path, output_path):
     team_votes = defaultdict(Counter)
     spans = {}
 
-    kp = load_homography(input_path)
+    global PITCH_SPOTS
+    base = os.path.splitext(input_path)[0]
+    # register.py の結果（全フレームのホモグラフィ、メートル座標）があればそれを使う。
+    # なければ従来の方式（pick_keypoints.py の1フレーム + 前向きの追従、StatsBomb座標）
+    reg = None
+    if os.path.exists(base + "_homography.npz"):
+        reg = np.load(base + "_homography.npz")
+        PITCH_SPOTS = pitch.spots(float(reg["pitch_length"]), float(reg["pitch_width"]))
+        pitch_meta = {"units": "m", "length": float(reg["pitch_length"]), "width": float(reg["pitch_width"])}
+        print(f"  位置合わせ: {os.path.basename(base)}_homography.npz（{int(reg['valid'].sum())}/{len(reg['valid'])} フレーム、メートル座標）")
+        kp = None
+    else:
+        kp = load_homography(input_path)
+        pitch_meta = {"units": "statsbomb"}
     H_ref = kp["H"] if kp else None
     ref_frame = kp["ref_frame"] if kp else 0
     motion = CameraMotionEstimator() if (H_ref is not None and CAMERA_MOVES) else None
@@ -783,7 +800,11 @@ def process_video(input_path, output_path):
 
         # ---- 画像→ピッチのホモグラフィを現在フレーム用に更新する ----
         # （キーポイントを取ったフレームより前は2D座標を出さない）
-        if H_ref is not None and motion is None:
+        if reg is not None:
+            ok_f = frame_idx < len(reg["valid"]) and bool(reg["valid"][frame_idx])
+            H_img2pitch, h_ok = (reg["H"][frame_idx], True) if ok_f else (None, False)
+            h_score = float(reg["score"][frame_idx]) if ok_f else 0.0
+        elif H_ref is not None and motion is None:
             H_img2pitch, h_ok, h_score = H_ref, True, 1.0
         elif H_ref is not None:
             H_cur2prev = motion.update(frame, raw.xyxy)
@@ -848,10 +869,10 @@ def process_video(input_path, output_path):
             if not occ and int(cid) != UNKNOWN:
                 team_votes[tid][int(cid)] += 1
             foot = ((box[0] + box[2]) / 2, box[3])
-            pitch = None
+            foot_pitch = None
             if H_for_2d is not None:
-                pitch = tuple(cv2.perspectiveTransform(np.float32([[foot]]), H_for_2d)[0, 0])
-            pos = {"img": foot, "pitch": pitch, "h": float(box[3] - box[1])}
+                foot_pitch = tuple(cv2.perspectiveTransform(np.float32([[foot]]), H_for_2d)[0, 0])
+            pos = {"img": foot, "pitch": foot_pitch, "h": float(box[3] - box[1])}
             if tid not in spans:
                 spans[tid] = {"f0": frame_idx, "start": pos}
             spans[tid]["f1"], spans[tid]["end"] = frame_idx, pos
@@ -952,7 +973,7 @@ def process_video(input_path, output_path):
 
     with open(base + "_meta.json", "w") as f:
         json.dump({"file_fps": fps, "slowdown": SLOWDOWN, "real_fps": real_fps,
-                   "output_step": SLOWDOWN if OUTPUT_SPEED == "realtime" else 1}, f)
+                   "output_step": SLOWDOWN if OUTPUT_SPEED == "realtime" else 1, "pitch": pitch_meta}, f)
     tracks = [{"tracker_id": tid, "team": next(k for k, v in TEAM_NAMES.items() if v == team) if team in TEAM_NAMES.values() else "unknown",
                "source": s, "start_frame": spans[tid]["f0"], "end_frame": spans[tid]["f1"],
                "votes": dict(team_votes.get(tid, {}))} for tid, (team, s) in sorted(team_of.items())]

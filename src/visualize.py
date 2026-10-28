@@ -33,7 +33,9 @@ if os.path.exists(meta_path):
     meta = json.load(open(meta_path))
     fps, slowdown = meta["file_fps"], meta["slowdown"]
     output_step = meta.get("output_step", slowdown)
+    pitch_meta = meta.get("pitch", {"units": "statsbomb"})
 else:
+    pitch_meta = {"units": "statsbomb"}
     cap = cv2.VideoCapture(os.path.join(BASE_DIR, TARGET_VIDEO))
     fps, slowdown = cap.get(cv2.CAP_PROP_FPS) or 30, 1
     output_step = 1
@@ -58,12 +60,21 @@ if SMOOTH_WINDOW > 1:
                                 .transform(lambda s: s.rolling(SMOOTH_WINDOW * slowdown, min_periods=1, center=True).mean()))
 
 # ホモグラフィの誤差で大きくはみ出した点は除外する
-df = df[df["pitch_x"].between(55, 125) & df["pitch_y"].between(-5, 85)]
+if pitch_meta["units"] == "m":
+    PL, PW = pitch_meta["length"], pitch_meta["width"]
+    df = df[df["pitch_x"].between(-5, PL + 5) & df["pitch_y"].between(-5, PW + 5)]
+else:
+    df = df[df["pitch_x"].between(55, 125) & df["pitch_y"].between(-5, 85)]
 frames = np.sort(df["frame"].unique())
 print(f"2D座標のあるフレーム: {len(frames)}  ({frames.min()}〜{frames.max()})")
 
-# 映っているゴールは常に右端に置いているので、右半面だけ描く
-pitch = Pitch(pitch_type="statsbomb", half=True, pitch_color="#22312b", line_color="#c7d5cc")
+if pitch_meta["units"] == "m":
+    # register.py の位置合わせ: 実寸（m）のピッチ全面。左下が原点、手前（カメラ側）が下
+    pitch = Pitch(pitch_type="custom", pitch_length=PL, pitch_width=PW,
+                  pitch_color="#22312b", line_color="#c7d5cc")
+else:
+    # 従来の方式: 映っているゴールは常に右端に置いているので、右半面だけ描く
+    pitch = Pitch(pitch_type="statsbomb", half=True, pitch_color="#22312b", line_color="#c7d5cc")
 
 
 def draw_snapshot(frame_no):
