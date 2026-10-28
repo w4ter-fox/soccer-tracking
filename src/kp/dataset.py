@@ -119,4 +119,4 @@ class PitchKeypointDataset(Dataset):
 
         x = torch.from_numpy(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).transpose(2, 0, 1).copy()).float() / 255.0
         x = (x - torch.tensor([0.485, 0.456, 0.406])[:, None, None]) / torch.tensor([0.229, 0.224, 0.225])[:, None, None]
-        return x, torch.from_numpy(hm), torch.from_numpy(pts), torch.from_numpy(valid)
+        return x, torch.from_numpy(hm.astype(np.float16)), torch.from_numpy(pts), torch.from_numpy(valid)

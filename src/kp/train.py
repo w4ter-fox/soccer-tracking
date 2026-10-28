@@ -35,7 +35,7 @@ def evaluate(model, loader, device, stride, thr=0.3, pck_px=5.0):
     hit = total = fp = n_neg = h_ok = n_img = 0
     loss_sum = 0.0
     for x, hm, pts, valid in loader:
-        x, hm = x.to(device), hm.to(device)
+        x, hm = x.to(device), hm.to(device).float()
         logits = model(x)
         loss_sum += focal_loss(logits, hm).item() * len(x)
         p = torch.sigmoid(logits)
@@ -134,7 +134,7 @@ def main():
         model.train()
         t0, tot = time.time(), 0.0
         for x, hm, _, _ in dl_tr:
-            x, hm = x.to(device, non_blocking=True), hm.to(device, non_blocking=True)
+            x, hm = x.to(device, non_blocking=True), hm.to(device, non_blocking=True).float()
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device == "cuda"):
                 logits = model(x)
             loss = focal_loss(logits, hm)
