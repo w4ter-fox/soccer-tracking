@@ -995,6 +995,10 @@ def main():
     ap.add_argument("--debug-overlay", action="store_true", help="推定中のピッチのラインを重ねる")
     ap.add_argument("--output-speed", choices=["input", "realtime"], default=OUTPUT_SPEED,
                     help="出力動画の速度（input: 入力と同じ / realtime: SLOWDOWN で割って実時間に戻す）")
+    ap.add_argument("--kp-model", default=None,
+                    help="ピッチのキーポイント検出モデル。指定すると、位置合わせ（register.py）を自動で実行してから追跡する")
+    ap.add_argument("--kp-every", type=int, default=5, help="キーポイントを何フレームごとに推論するか")
+    ap.add_argument("--re-register", action="store_true", help="位置合わせの結果があってもやり直す")
     ap.add_argument("--ball-tiles", type=int, default=BALL_TILES, help="ボール用のタイル分割数（0で無効、2で2×2）")
     args = ap.parse_args()
     BASE_DIR = os.path.abspath(args.data_dir)
@@ -1014,6 +1018,12 @@ def main():
         if not os.path.exists(input_path):
             print(f"\nエラー: {input_path} が見つかりません。")
             continue
+
+        npz = os.path.join(BASE_DIR, f"{name}_homography.npz")
+        if args.kp_model and (args.re_register or not os.path.exists(npz)):
+            import register
+            print(f"\n位置合わせ: {filename}")
+            register.run(filename, BASE_DIR, kp_model=args.kp_model, kp_every=args.kp_every)
 
         process_video(input_path, output_path)
 

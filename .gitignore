@@ -7,3 +7,5 @@ __pycache__/
 *.pt
 .ruff_cache/
 EOF*:Zone.Identifier
+models/
+*:Zone.Identifier
