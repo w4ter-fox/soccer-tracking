@@ -16,7 +16,9 @@ ap.add_argument("video", help="動画ファイル名（例: video1.mp4）")
 ap.add_argument("--data-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"))
 ap.add_argument("--snapshot-frame", type=int, default=None)
 ap.add_argument("--no-video", action="store_true")
-ap.add_argument("--ball", choices=["none", "near", "all"], default="near",
+ap.add_argument("--max-gap", type=float, default=1.5,
+                help="選手が見えなかった区間をこの秒数（実時間）まで、前後の位置から補って描く（0で補わない）")
+ap.add_argument("--ball", choices=["none", "near", "all"], default="none",
                 help="2Dにボールをどう出すか。none: 出さない / near: 選手の近く（地面にある可能性が高い）だけ / all: 全部")
 ap.add_argument("--ball-near-m", type=float, default=2.0, help="--ball near で、選手からこの距離（m）以内のときだけ出す")
 args = ap.parse_args()
@@ -53,6 +55,32 @@ STYLE = {
     4: ("#ff8c00", "black", "Ball"),
     5: ("#969696", "black", "Unknown"),
 }
+
+# 選手が見えなかった短い区間（隠れた、検出が一瞬抜けた等）を、前後の位置の直線補間で埋める。
+# 途切れが長いところは、どこにいたか分からないので埋めない
+real_fps = meta.get("real_fps", fps * slowdown) if os.path.exists(meta_path) else fps * slowdown
+max_gap_frames = int(args.max_gap * real_fps)
+if max_gap_frames > 0:
+    filled = []
+    n_added = 0
+    for tid, g in df[df["class_id"] != 4].groupby("tracker_id"):
+        g = g.drop_duplicates("frame").set_index("frame").sort_index()
+        full = g.reindex(range(int(g.index.min()), int(g.index.max()) + 1))
+        missing = full["pitch_x"].isna()
+        # 欠けている区間ごとの長さを数え、長い区間は補間しない
+        run_id = (missing != missing.shift()).cumsum()
+        run_len = missing.groupby(run_id).transform("sum")
+        fillable = missing & (run_len <= max_gap_frames)
+        interp = full[["pitch_x", "pitch_y"]].interpolate(limit_area="inside")
+        full.loc[fillable, ["pitch_x", "pitch_y"]] = interp.loc[fillable]
+        full.loc[fillable, ["tracker_id", "class_id"]] = [tid, g["class_id"].iloc[0]]
+        full["interpolated"] = fillable
+        n_added += int(fillable.sum())
+        filled.append(full[full["pitch_x"].notna()].reset_index().rename(columns={"index": "frame"}))
+    df = pd.concat(filled + [df[df["class_id"] == 4].assign(interpolated=False)], ignore_index=True)
+    df["tracker_id"] = df["tracker_id"].astype(int)
+    df["class_id"] = df["class_id"].astype(int)
+    print(f"選手の途切れを補間: {n_added} 点（{args.max_gap} 秒以内の途切れ）")
 
 # 選手は同じトラッカーIDの中で移動平均をかける（ボールはIDが不安定なのでそのまま）
 df = df.sort_values(["tracker_id", "frame"])
