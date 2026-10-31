@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 
 import pitch
-from pick_keypoints import FrameReader
+from video_io import FrameReader
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 PREVIEW_WIDTH = 1280

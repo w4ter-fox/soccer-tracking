@@ -1,11 +1,9 @@
-cat > .gitignore <<'EOF'
 data/*
 !data/.gitkeep
+models/
 .venv/
 __pycache__/
 *.pyc
 *.pt
 .ruff_cache/
-EOF*:Zone.Identifier
-models/
 *:Zone.Identifier

@@ -1,4 +1,9 @@
-"""ピッチのキーポイント指定（ローカル版）
+"""（旧方式）片側ゴールの PA 4角 + コーナー 2点によるキーポイント指定
+
+現在は pick_keyframes.py（全面・複数フレーム）と kp/（自動検出）を使う。track.py は
+<動画名>_homography.npz がないときだけ、この方式の <動画名>_keypoints.json を使う。
+
+ピッチのキーポイント指定（ローカル版）
 
 OpenCV のウィンドウで動画のフレームを移動しながら、片側ゴールの PA 4角とコーナー 2点をクリックする。
 WSL2 では WSLg（Windows 11）でウィンドウが開く。
@@ -23,7 +28,7 @@ from collections import OrderedDict
 import cv2
 import numpy as np
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data")
 PREVIEW_WIDTH = 1280
 
 # 映像の中でゴールが画面の左右どちらにあるか（"right" / "left"）

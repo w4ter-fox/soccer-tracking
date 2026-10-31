@@ -1,7 +1,9 @@
 [project]
 name = "soccer-tracking"
 version = "0.1.0"
-description = "サッカー映像の選手・ボールトラッキングと2Dピッチ化"
+description = "Player and ball tracking with automatic pitch registration for soccer footage"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "torch>=2.4",
