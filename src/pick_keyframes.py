@@ -17,7 +17,6 @@
   k               保存済みのキーフレームの一覧
   q / Esc         終了
 """
-""" """
 import argparse
 import json
 import os

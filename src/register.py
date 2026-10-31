@@ -31,7 +31,6 @@ import numpy as np
 import supervision as sv
 from scipy.ndimage import map_coordinates
 from scipy.optimize import least_squares
-from scipy.signal import savgol_filter
 from ultralytics import YOLO
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
