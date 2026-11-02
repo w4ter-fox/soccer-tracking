@@ -112,3 +112,5 @@ uv run ruff check src tests scripts
 ## 謝辞
 
 [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)、[supervision](https://github.com/roboflow/supervision)、[trackers](https://github.com/roboflow/trackers)、[mplsoccer](https://github.com/andrewRowlinson/mplsoccer)、[SoccerNet](https://www.soccer-net.org/) の Camera Calibration データセットを使用した。SoccerNet で学習した重みはこのリポジトリでは配布しない（共有する場合は SoccerNet の利用条件を確認すること）。
+
+このプロジェクトは、コードの生成・デバッグ・ドキュメントの作成に Claude（Anthropic）の支援を受けて開発した。設計上の判断、実映像での実験、モデルの学習は作者が行った。

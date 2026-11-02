@@ -144,3 +144,5 @@ The tests use synthetic data (rendered pitch lines, simulated runners and ball t
 ## Acknowledgements
 
 [Ultralytics YOLO](https://github.com/ultralytics/ultralytics), [supervision](https://github.com/roboflow/supervision), [trackers](https://github.com/roboflow/trackers), [mplsoccer](https://github.com/andrewRowlinson/mplsoccer), and the [SoccerNet](https://www.soccer-net.org/) Camera Calibration dataset. Model weights trained on SoccerNet are not distributed in this repository; check the SoccerNet terms before sharing them.
+
+This project was developed with assistance from Claude (Anthropic) for code generation, debugging and documentation. Design decisions, experiments on real footage and model training were carried out by the author.
