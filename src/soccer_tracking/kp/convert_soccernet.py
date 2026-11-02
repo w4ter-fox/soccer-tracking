@@ -13,13 +13,13 @@ SoccerNet-Calibration の注釈は「白線のクラスごとに、線上の点�
   5. 37個の目印を画像に投影し、画面内にあるものをラベルにする
 
 使い方:
-  uv run python -m kp.convert_soccernet --soccernet ~/data/soccernet/calibration-2023 --out ~/data/sn_keypoints
-  （src/ で実行する。--soccernet の下に train/ valid/ test/ があり、各フォルダに 00000.jpg と 00000.json が並ぶ想定）
+  uv run python -m soccer_tracking.kp.convert_soccernet --soccernet ~/data/soccernet/calibration-2023 --out ~/data/sn_keypoints
+  （リポジトリの直下で実行する。--soccernet の下に train/ valid/ test/ があり、各フォルダに 00000.jpg と 00000.json が並ぶ想定）
 """
+
 import argparse
 import json
 import os
-import sys
 from concurrent.futures import ProcessPoolExecutor
 
 import cv2
@@ -27,14 +27,13 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import pitch  # noqa: E402
+from .. import pitch
 
-L, W = 105.0, 68.0          # SoccerNet のピッチ寸法
+L, W = 105.0, 68.0  # SoccerNet のピッチ寸法
 C = W / 2
 R = pitch.CIRCLE_R
-MAX_RMSE_PX = 4.0           # 注釈点とモデルのずれ（px、90パーセンタイル）がこれを超える画像は捨てる
-MIN_CLASSES = 2             # 最低限必要な白線のクラス数
+MAX_RMSE_PX = 4.0  # 注釈点とモデルのずれ（px、90パーセンタイル）がこれを超える画像は捨てる
+MIN_CLASSES = 2  # 最低限必要な白線のクラス数
 
 # SoccerNet のクラス → pitch.py の座標でのモデル（"top" は画面の上 = 奥、"bottom" は手前）
 STRAIGHT = {
@@ -73,16 +72,18 @@ PAIRS = {
     ("Middle line", "Side line top"): "half_touch_far",
 }
 for side, sl in [("l", "left"), ("r", "right")]:
-    PAIRS.update({
-        (f"Side line {sl}", f"Big rect. {sl} bottom"): f"{side}_pa_goal_near",
-        (f"Side line {sl}", f"Big rect. {sl} top"): f"{side}_pa_goal_far",
-        (f"Big rect. {sl} main", f"Big rect. {sl} bottom"): f"{side}_pa_field_near",
-        (f"Big rect. {sl} main", f"Big rect. {sl} top"): f"{side}_pa_field_far",
-        (f"Side line {sl}", f"Small rect. {sl} bottom"): f"{side}_ga_goal_near",
-        (f"Side line {sl}", f"Small rect. {sl} top"): f"{side}_ga_goal_far",
-        (f"Small rect. {sl} main", f"Small rect. {sl} bottom"): f"{side}_ga_field_near",
-        (f"Small rect. {sl} main", f"Small rect. {sl} top"): f"{side}_ga_field_far",
-    })
+    PAIRS.update(
+        {
+            (f"Side line {sl}", f"Big rect. {sl} bottom"): f"{side}_pa_goal_near",
+            (f"Side line {sl}", f"Big rect. {sl} top"): f"{side}_pa_goal_far",
+            (f"Big rect. {sl} main", f"Big rect. {sl} bottom"): f"{side}_pa_field_near",
+            (f"Big rect. {sl} main", f"Big rect. {sl} top"): f"{side}_pa_field_far",
+            (f"Side line {sl}", f"Small rect. {sl} bottom"): f"{side}_ga_goal_near",
+            (f"Side line {sl}", f"Small rect. {sl} top"): f"{side}_ga_goal_far",
+            (f"Small rect. {sl} main", f"Small rect. {sl} bottom"): f"{side}_ga_field_near",
+            (f"Small rect. {sl} main", f"Small rect. {sl} top"): f"{side}_ga_field_far",
+        }
+    )
 
 KP = pitch.keypoints(L, W)
 KP_XY = {k: xy for k, _, xy in KP}
@@ -105,6 +106,7 @@ MODEL = model_samples()
 
 
 # ---------------------------------------------------------------- 幾何の道具
+
 
 def fit_line(pts):
     """点列に直線を当てはめ、同次座標の直線 (a, b, c)（a^2+b^2=1）を返す"""
@@ -130,9 +132,9 @@ def ellipse_conic(pts):
         return None
     t = np.deg2rad(ang)
     c, s = np.cos(t), np.sin(t)
-    A = c * c / a ** 2 + s * s / b ** 2
-    B = 2 * c * s * (1 / a ** 2 - 1 / b ** 2)
-    Cc = s * s / a ** 2 + c * c / b ** 2
+    A = c * c / a**2 + s * s / b**2
+    B = 2 * c * s * (1 / a**2 - 1 / b**2)
+    Cc = s * s / a**2 + c * c / b**2
     D = -2 * A * cx - B * cy
     E = -B * cx - 2 * Cc * cy
     F = A * cx * cx + B * cx * cy + Cc * cy * cy - 1
@@ -142,8 +144,8 @@ def ellipse_conic(pts):
 def line_conic(line, Q):
     """直線と円錐曲線の交点（0〜2個）"""
     a, b, c = line
-    p0 = np.array([-a * c, -b * c, 1.0])         # 直線上の原点に一番近い点
-    d = np.array([-b, a, 0.0])                   # 直線の向き
+    p0 = np.array([-a * c, -b * c, 1.0])  # 直線上の原点に一番近い点
+    d = np.array([-b, a, 0.0])  # 直線の向き
     qa, qb, qc = d @ Q @ d, 2 * p0 @ Q @ d, p0 @ Q @ p0
     disc = qb * qb - 4 * qa * qc
     if abs(qa) < 1e-12 or disc < 0:
@@ -158,7 +160,7 @@ def center_view_points(lines, conic):
     ab = line_conic(lm, conic)
     if len(ab) != 2:
         return {}
-    a, b = sorted(ab, key=lambda p: -p[1])      # 画面の下（手前）が先
+    a, b = sorted(ab, key=lambda p: -p[1])  # 画面の下（手前）が先
     pts = {"circle_half_near": a, "circle_half_far": b}
     for cls, key in [("Side line bottom", "half_touch_near"), ("Side line top", "half_touch_far")]:
         if cls in lines:
@@ -199,6 +201,14 @@ def _norm_T(pts):
     return np.array([[s, 0, -s * c[0]], [0, s, -s * c[1]], [0, 0, 1]])
 
 
+def _line_coef(mn, j):
+    """H を9要素のベクトルにしたときの、(H^T m) の j 成分の係数"""
+    c = np.zeros(9)
+    for i in range(3):
+        c[3 * i + j] = mn[i]
+    return c
+
+
 def dlt_points_lines(img_pts, pit_pts, img_lines, pit_lines):
     """点の対応と直線の対応の両方からホモグラフィ（画像→ピッチ）を線形に求める（正規化付き DLT）。
     交点が狭い範囲（ゴールエリアだけ等）にしかなくても、画面全体に伸びる白線が拘束になるので外挿に強い"""
@@ -214,16 +224,11 @@ def dlt_points_lines(img_pts, pit_pts, img_lines, pit_lines):
         rows.append(np.r_[y[2] * x, np.zeros(3), -y[0] * x])
     Tiinv_T = np.linalg.inv(Ti).T
     Tpinv_T = np.linalg.inv(Tp).T
-    for l, m in zip(img_lines, pit_lines):
-        ln = Tiinv_T @ l
-        mn = Tpinv_T @ m
+    for line_img, line_pit in zip(img_lines, pit_lines):
+        ln = Tiinv_T @ line_img
+        mn = Tpinv_T @ line_pit
         # H^T m ∝ l  →  l × (H^T m) = 0。H^T m の j 成分 = Σ_i H[i, j] m_i
-        def coef(j):
-            c = np.zeros(9)
-            for i in range(3):
-                c[3 * i + j] = mn[i]
-            return c
-        c0, c1, c2 = coef(0), coef(1), coef(2)
+        c0, c1, c2 = (_line_coef(mn, j) for j in range(3))
         rows.append(ln[1] * c2 - ln[2] * c1)
         rows.append(ln[2] * c0 - ln[0] * c2)
     A = np.array(rows)
@@ -236,6 +241,7 @@ def dlt_points_lines(img_pts, pit_pts, img_lines, pit_lines):
 
 
 # ---------------------------------------------------------------- 1枚の変換
+
 
 def anchors(w, h):
     return np.float32([[0.1 * w, 0.55 * h], [0.9 * w, 0.55 * h], [0.1 * w, 0.95 * h], [0.9 * w, 0.95 * h]])
@@ -317,7 +323,7 @@ def convert_one(img_path, ann_path, w, h):
         a = np.array([[p["x"], p["y"]] for p in pts], dtype=np.float64)
         if len(a) == 0:
             continue
-        if a.max() <= 1.5:                       # 0〜1 に正規化されている
+        if a.max() <= 1.5:  # 0〜1 に正規化されている
             a = a * [w, h]
         obs[cls] = a
     if len(obs) < MIN_CLASSES:
@@ -355,8 +361,7 @@ def convert_one(img_path, ann_path, w, h):
             kps[k] = [float(u), float(v)]
     if len(kps) < 4:
         return None
-    return {"image": img_path, "width": w, "height": h, "keypoints": kps, "rmse_px": rmse,
-            "H_img2pitch": H.tolist()}
+    return {"image": img_path, "width": w, "height": h, "keypoints": kps, "rmse_px": rmse, "H_img2pitch": H.tolist()}
 
 
 def _job(args):
@@ -402,7 +407,7 @@ def main():
             for i, (k, _, _) in enumerate(KP):
                 counts[i] += k in it["keypoints"]
         print(f"{split}: {len(items)}/{len(jobs)} 枚を採用")
-        for (k, jp, _), c in zip(KP, counts):
+        for (_, jp, _), c in zip(KP, counts):
             print(f"  {jp}: {c}")
 
         prev_dir = os.path.join(args.out, f"preview_{split}")
@@ -410,7 +415,7 @@ def main():
         for it in items[:: max(1, len(items) // max(args.preview, 1))][: args.preview]:
             img = cv2.imread(it["image"])
             G = np.linalg.inv(np.array(it["H_img2pitch"]))
-            for cls, m in MODEL.items():
+            for _cls, m in MODEL.items():
                 uv = project(G, m)
                 uv = uv[~np.isnan(uv).any(1)].astype(int)
                 for u, v in uv:

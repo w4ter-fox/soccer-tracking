@@ -17,48 +17,48 @@ track.py はこのファイルがあれば、それを使って2D座標を出す
 前のキーフレームから動きでつないだ結果より白線に合わないものは使わない。
 
 使い方:
-  uv run python src/register.py video3.mov
-  uv run python src/register.py video3.mov --kp-model models/pitch_kp/best.pt --kp-every 5
-  uv run python src/register.py video3.mov --debug-video   （投影したラインを重ねた確認用動画も出す）
+  uv run soccer-register video3.mov
+  uv run soccer-register video3.mov --kp-model models/pitch_kp/best.pt --kp-every 5
+  uv run soccer-register video3.mov --debug-video   （投影したラインを重ねた確認用動画も出す）
 """
+
 import argparse
 import json
 import os
-import sys
 
 import cv2
 import numpy as np
-import supervision as sv
 from scipy.ndimage import map_coordinates
 from scipy.optimize import least_squares
-from ultralytics import YOLO
+from scipy.signal import savgol_filter
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pitch
-from track import CameraMotionEstimator, FFmpegWriter, get_pitch_mask, is_scene_cut, white_line_mask
+from . import pitch
+from .video_io import FFmpegWriter
+from .vision import CameraMotionEstimator, get_pitch_mask, is_scene_cut, white_line_mask
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+DATA_DIR = "data"
 
-PERSON_MODEL = "yolo11s.pt"   # 選手の位置（白線・縞・特徴点の検出から除くため）を取るだけなので小さいモデルで十分
+PERSON_MODEL = "yolo11s.pt"  # 選手の位置（白線・縞・特徴点の検出から除くため）を取るだけなので小さいモデルで十分
 PERSON_IMGSZ = 960
 
-REFINE_EVERY = 2          # 何フレームごとに白線・縞で補正するか（間のフレームは補正量を補間する）
-LINE_DIST_CAP = 20.0      # 白線・縞からの距離の上限（px）
-INLIER_PX = 3.0           # この距離以内ならラインに乗っているとみなす
-STRIPE_WEIGHT = 0.3       # 縞の重み（白線より弱い手がかりなので小さく）
-MAX_CORRECTION_M = 2.0    # 1回の補正で動かしてよい量（m）。縞は1本ずれても当てはまるので、取り違えを防ぐ上限
-KEYFRAME_MAX_CORRECTION_M = 5.0   # キーフレームの補正の上限（白線だけで合わせるので大きめでよい）
-MIN_LINE_POINTS = 60      # 画面内の白線の点がこれより少ないと、白線での判定はしない
-MIN_STRIPE_POINTS = 150   # 同、縞
-SMOOTH_FRAMES = 15        # 平滑化の窓（フレーム数、奇数）
-STRIPE_PERIOD_RANGE = (3.0, 9.0)   # 縞の幅の探索範囲（m）
+REFINE_EVERY = 2  # 何フレームごとに白線・縞で補正するか（間のフレームは補正量を補間する）
+LINE_DIST_CAP = 20.0  # 白線・縞からの距離の上限（px）
+INLIER_PX = 3.0  # この距離以内ならラインに乗っているとみなす
+STRIPE_WEIGHT = 0.3  # 縞の重み（白線より弱い手がかりなので小さく）
+MAX_CORRECTION_M = 2.0  # 1回の補正で動かしてよい量（m）。縞は1本ずれても当てはまるので、取り違えを防ぐ上限
+KEYFRAME_MAX_CORRECTION_M = 5.0  # キーフレームの補正の上限（白線だけで合わせるので大きめでよい）
+MIN_LINE_POINTS = 60  # 画面内の白線の点がこれより少ないと、白線での判定はしない
+MIN_STRIPE_POINTS = 150  # 同、縞
+SMOOTH_FRAMES = 15  # 平滑化の窓（フレーム数、奇数）
+STRIPE_PERIOD_RANGE = (3.0, 9.0)  # 縞の幅の探索範囲（m）
 
-KP_EVERY = 5              # キーポイントのモデルを何フレームごとに推論するか
-KP_SCORE = 0.3            # キーポイントとして使う最低スコア
-AUTO_MIN_LINE_SCORE = 0.3 # 自動のキーフレームは、白線に乗っている割合がこれ以上のときだけ採用
+KP_EVERY = 5  # キーポイントのモデルを何フレームごとに推論するか
+KP_SCORE = 0.3  # キーポイントとして使う最低スコア
+AUTO_MIN_LINE_SCORE = 0.3  # 自動のキーフレームは、白線に乗っている割合がこれ以上のときだけ採用
 
 
 # ---------------------------------------------------------------- 縞の検出
+
 
 def stripe_edge_mask(frame, pitch_mask, person_boxes, line_mask):
     """芝の縞の境界（明るさの緩やかな段差）を取り出す。白線・選手・ピッチ外は除く"""
@@ -71,7 +71,7 @@ def stripe_edge_mask(frame, pitch_mask, person_boxes, line_mask):
     valid = cv2.erode(pitch_mask, np.ones((15, 15), np.uint8)) > 0
     valid &= cv2.dilate(line_mask, np.ones((9, 9), np.uint8)) == 0
     for x1, y1, x2, y2 in np.asarray(person_boxes).astype(int):
-        valid[max(y1 - 6, 0):y2 + 6, max(x1 - 6, 0):x2 + 6] = False
+        valid[max(y1 - 6, 0) : y2 + 6, max(x1 - 6, 0) : x2 + 6] = False
     if valid.sum() < 1000:
         return np.zeros(mag.shape, np.uint8)
     thr = max(np.percentile(mag[valid], 90), 1.5)
@@ -117,6 +117,7 @@ def estimate_stripes(xs, L=None):
 
 
 # ---------------------------------------------------------------- 補正
+
 
 def distance_map(mask):
     if mask is None or cv2.countNonZero(mask) < 100:
@@ -190,9 +191,16 @@ class Refiner:
 
         before = self.scores(self.H_of(P0), dl, ds)
         try:
-            res = least_squares(resid, np.zeros(8), jac=jac, loss="soft_l1", f_scale=INLIER_PX,
-                                x_scale=0.5, max_nfev=40,
-                                bounds=(-bound, bound))
+            res = least_squares(
+                resid,
+                np.zeros(8),
+                jac=jac,
+                loss="soft_l1",
+                f_scale=INLIER_PX,
+                x_scale=0.5,
+                max_nfev=40,
+                bounds=(-bound, bound),
+            )
         except Exception:
             return None
         P1 = P0 + res.x.reshape(4, 2)
@@ -215,6 +223,7 @@ def accept(before, after):
 
 # ---------------------------------------------------------------- 本体
 
+
 def project(H, pts):
     hom = np.c_[pts, np.ones(len(pts))] @ H.T
     if (hom[:, 2] <= 1e-9).any():
@@ -222,10 +231,23 @@ def project(H, pts):
     return hom[:, :2] / hom[:, 2:]
 
 
-def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_SCORE,
-        use_stripes=True, refine_every=REFINE_EVERY, smooth=SMOOTH_FRAMES, debug_video=False,
-        pitch_length=None, pitch_width=None):
+def run(
+    video,
+    data_dir=DATA_DIR,
+    kp_model=None,
+    kp_every=KP_EVERY,
+    kp_score=KP_SCORE,
+    use_stripes=True,
+    refine_every=REFINE_EVERY,
+    smooth=SMOOTH_FRAMES,
+    debug_video=False,
+    pitch_length=None,
+    pitch_width=None,
+):
     """位置合わせを実行して <動画名>_homography.npz を保存する。track.py からも呼ばれる"""
+    import supervision as sv
+    from ultralytics import YOLO
+
     data_dir = os.path.abspath(data_dir)
     name = os.path.splitext(video)[0]
     path = os.path.join(data_dir, video)
@@ -239,12 +261,17 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
     manual = {k["frame"]: np.array(k["H_img2pitch"], dtype=np.float64) for k in doc["keyframes"]}
     detector = None
     if kp_model:
-        from kp.detect import KeypointDetector, homography_from_detections
+        from .kp.detect import KeypointDetector, homography_from_detections
+
         detector = KeypointDetector(kp_model)
     if not manual and detector is None:
-        raise SystemExit("キーフレームもキーポイントのモデルもありません。pick_keyframes.py で指定するか --kp-model を付けてください。")
-    print(f"ピッチ {L} m × {W} m / 手動キーフレーム {sorted(manual)} / 自動推論 "
-          f"{'あり（' + str(kp_every) + ' フレームごと）' if detector else 'なし'}")
+        raise SystemExit(
+            "キーフレームもキーポイントのモデルもありません。pick_keyframes.py で指定するか --kp-model を付けてください。"
+        )
+    print(
+        f"ピッチ {L} m × {W} m / 手動キーフレーム {sorted(manual)} / 自動推論 "
+        f"{'あり（' + str(kp_every) + ' フレームごと）' if detector else 'なし'}"
+    )
 
     model = YOLO(PERSON_MODEL)
     motion = CameraMotionEstimator()
@@ -260,14 +287,20 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
     kf, kf_src = {}, {}
     prev_hist = None
     shape = None
-    H_run = None                    # 直前の確定キーフレームから動きでつないだホモグラフィ
+    H_run = None  # 直前の確定キーフレームから動きでつないだホモグラフィ
     n_auto_try = n_auto_ok = n_replaced = 0
     for f, frame in enumerate(sv.get_video_frames_generator(path)):
         if shape is None:
             shape = frame.shape
             h_img, w_img = shape[:2]
-            A = np.float32([[0.1 * w_img, 0.55 * h_img], [0.9 * w_img, 0.55 * h_img],
-                            [0.1 * w_img, 0.95 * h_img], [0.9 * w_img, 0.95 * h_img]])
+            A = np.float32(
+                [
+                    [0.1 * w_img, 0.55 * h_img],
+                    [0.9 * w_img, 0.55 * h_img],
+                    [0.1 * w_img, 0.95 * h_img],
+                    [0.9 * w_img, 0.95 * h_img],
+                ]
+            )
             kref = Refiner(A, L, W, None, None)
         r = model(frame, imgsz=PERSON_IMGSZ, conf=0.25, classes=[0], verbose=False)[0]
         b = r.boxes.xyxy.cpu().numpy()
@@ -300,7 +333,9 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
                 H_kf, s_kf = H_ch, s_ch
                 n_replaced += 1
                 if src == "manual":
-                    print(f"  キーフレーム {f}: 前からつないだ方が白線に合う（クリックが不正確な可能性）ので置き換えます")
+                    print(
+                        f"  キーフレーム {f}: 前からつないだ方が白線に合う（クリックが不正確な可能性）ので置き換えます"
+                    )
         if H_kf is None or (src == "auto" and s_kf < AUTO_MIN_LINE_SCORE):
             continue
         kf[f], kf_src[f] = H_kf, src
@@ -310,14 +345,18 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
             ys, xs = np.nonzero(stripe_edge_mask(frame, pm, b, lm))
             if len(xs):
                 sel = np.random.default_rng(f).choice(len(xs), min(len(xs), 5000), replace=False)
-                pxy = cv2.perspectiveTransform(np.float32(np.c_[xs[sel], ys[sel]]).reshape(-1, 1, 2), H_kf).reshape(-1, 2)
+                pxy = cv2.perspectiveTransform(np.float32(np.c_[xs[sel], ys[sel]]).reshape(-1, 1, 2), H_kf).reshape(
+                    -1, 2
+                )
                 inside = (pxy[:, 0] > 0) & (pxy[:, 0] < L) & (pxy[:, 1] > 0) & (pxy[:, 1] < W)
                 stripe_x += list(pxy[inside, 0])
 
     N = len(boxes)
     print(f"  {N} フレーム / カット {sum(1 for f in range(1, N) if not link_ok[f])} 箇所")
-    print(f"  キーフレーム: 手動 {sum(1 for s in kf_src.values() if s == 'manual')} / "
-          f"自動 {n_auto_ok}（推論 {n_auto_try} 回中）/ つないだ結果で置き換え {n_replaced}")
+    print(
+        f"  キーフレーム: 手動 {sum(1 for s in kf_src.values() if s == 'manual')} / "
+        f"自動 {n_auto_ok}（推論 {n_auto_try} 回中）/ つないだ結果で置き換え {n_replaced}"
+    )
     if not kf:
         raise SystemExit("確定したキーフレームがありません。")
 
@@ -348,7 +387,7 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
         pf = project(fwd[f], A) if fwd[f] is not None else None
         pb = project(bwd[f], A) if bwd[f] is not None else None
         if pf is not None and pb is not None:
-            wf = bwd_d[f] / max(fwd_d[f] + bwd_d[f], 1)      # 近いキーフレームほど重く
+            wf = bwd_d[f] / max(fwd_d[f] + bwd_d[f], 1)  # 近いキーフレームほど重く
             P_chain[f] = wf * pf + (1 - wf) * pb
         else:
             P_chain[f] = pf if pf is not None else pb
@@ -392,7 +431,7 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
             continue
         if s is None:
             s = f
-        elif not link_ok[f]:          # カットをまたいで補間・平滑化しない
+        elif not link_ok[f]:  # カットをまたいで補間・平滑化しない
             segments.append((s, f))
             s = f
     if s is not None:
@@ -408,7 +447,7 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
             corr = np.zeros_like(base)
         seq = base + corr
         win = min(smooth, len(frames))
-        win -= 1 - win % 2           # 奇数にする
+        win -= 1 - win % 2  # 奇数にする
         if smooth and win >= 5:
             seq = savgol_filter(seq.reshape(len(frames), 8), win, 2, axis=0).reshape(-1, 4, 2)
         P[s:e] = seq
@@ -422,18 +461,32 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
     for f in np.nonzero(valid)[0]:
         H[f] = cv2.getPerspectiveTransform(A, P[f].astype(np.float32))
     out_npz = os.path.join(data_dir, f"{name}_homography.npz")
-    np.savez(out_npz, H=H, valid=valid, score=line_score, pitch_length=L, pitch_width=W,
-             stripe_period=period if period else np.nan, stripe_x0=x0 if x0 is not None else np.nan,
-             keyframes=np.array(sorted(kf)), keyframe_auto=np.array([kf_src[f] == "auto" for f in sorted(kf)]))
+    np.savez(
+        out_npz,
+        H=H,
+        valid=valid,
+        score=line_score,
+        pitch_length=L,
+        pitch_width=W,
+        stripe_period=period if period else np.nan,
+        stripe_x0=x0 if x0 is not None else np.nan,
+        keyframes=np.array(sorted(kf)),
+        keyframe_auto=np.array([kf_src[f] == "auto" for f in sorted(kf)]),
+    )
     print(f"保存: {out_npz}（2D座標が出るフレーム {valid.sum()}/{N}）")
 
     # ---- 4. 確認用動画 ----
     if debug_video:
         print("3/3 確認用動画...")
         line_pts, _ = pitch.sample_segments(pitch.line_segments(L, W), step=0.3)
-        stripe_pts = pitch.sample_segments(pitch.stripe_segments(L, W, x0, period), step=0.3)[0] if period else np.zeros((0, 2))
-        meta = json.load(open(os.path.join(data_dir, f"{name}_meta.json"))) if os.path.exists(
-            os.path.join(data_dir, f"{name}_meta.json")) else {}
+        stripe_pts = (
+            pitch.sample_segments(pitch.stripe_segments(L, W, x0, period), step=0.3)[0] if period else np.zeros((0, 2))
+        )
+        meta = (
+            json.load(open(os.path.join(data_dir, f"{name}_meta.json")))
+            if os.path.exists(os.path.join(data_dir, f"{name}_meta.json"))
+            else {}
+        )
         fps = meta.get("file_fps") or sv.VideoInfo.from_video_path(path).fps or 30
         out_mp4 = os.path.join(data_dir, f"{name}_registration.mp4")
         with FFmpegWriter(out_mp4, w_img, h_img, fps) as sink:
@@ -449,15 +502,21 @@ def run(video, data_dir=DATA_DIR, kp_model=None, kp_every=KP_EVERY, kp_score=KP_
                         uv = (hom[ok, :2] / hom[ok, 2:]).astype(int)
                         m = (uv[:, 0] >= 0) & (uv[:, 0] < w_img) & (uv[:, 1] >= 0) & (uv[:, 1] < h_img)
                         img[uv[m, 1], uv[m, 0]] = col
-                    cv2.putText(img, f"frame {f}  line {line_score[f]:.2f}", (10, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                    cv2.putText(
+                        img,
+                        f"frame {f}  line {line_score[f]:.2f}",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (255, 255, 255),
+                        2,
+                    )
                 else:
-                    cv2.putText(img, f"frame {f}  no registration", (10, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    cv2.putText(
+                        img, f"frame {f}  no registration", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2
+                    )
                 sink.write_frame(img)
         print(f"保存: {out_mp4}（マゼンタ: 白線 / 水色: 縞の境界）")
-
-
 
 
 def refine_with_lines(kref, A, H0, dl, bound):
@@ -486,7 +545,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("video")
     ap.add_argument("--data-dir", default=DATA_DIR)
-    ap.add_argument("--kp-model", default=None, help="キーポイント検出モデル（kp/train.py の best.pt）。指定すると自動でキーフレームを作る")
+    ap.add_argument(
+        "--kp-model",
+        default=None,
+        help="キーポイント検出モデル（kp/train.py の best.pt）。指定すると自動でキーフレームを作る",
+    )
     ap.add_argument("--kp-every", type=int, default=KP_EVERY, help="何フレームごとにキーポイントを推論するか")
     ap.add_argument("--kp-score", type=float, default=KP_SCORE, help="キーポイントとして使う最低スコア")
     ap.add_argument("--no-stripes", action="store_true", help="芝の縞を使わない")
@@ -496,8 +559,19 @@ def main():
     ap.add_argument("--pitch-width", type=float, default=None)
     ap.add_argument("--debug-video", action="store_true", help="投影したピッチのラインと縞を重ねた確認用動画を出す")
     a = ap.parse_args()
-    run(a.video, a.data_dir, a.kp_model, a.kp_every, a.kp_score, not a.no_stripes, a.refine_every, a.smooth,
-        a.debug_video, a.pitch_length, a.pitch_width)
+    run(
+        a.video,
+        a.data_dir,
+        a.kp_model,
+        a.kp_every,
+        a.kp_score,
+        not a.no_stripes,
+        a.refine_every,
+        a.smooth,
+        a.debug_video,
+        a.pitch_length,
+        a.pitch_width,
+    )
 
 
 if __name__ == "__main__":

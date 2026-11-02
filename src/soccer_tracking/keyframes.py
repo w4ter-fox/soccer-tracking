@@ -2,7 +2,7 @@
 
 動画の中の何フレームか（例: 冒頭のセンターサークル、後半のゴール前）で、映っている目印をクリックする。
 目印はセンターマーク・センターサークル・ハーフウェイライン・コーナー・PA・ゴールエリア・ペナルティマークなど37種類。
-キーフレームが2つ以上あれば、register.py がその間を前後両方向からつないで全フレームの位置合わせをする。
+キーフレームが2つ以上あれば、registration.py がその間を前後両方向からつないで全フレームの位置合わせをする。
 
 操作:
   クリック        今選んでいる目印の位置を置く（置いたら次の目印に進む）
@@ -17,6 +17,7 @@
   k               保存済みのキーフレームの一覧
   q / Esc         終了
 """
+
 import argparse
 import json
 import os
@@ -24,10 +25,10 @@ import os
 import cv2
 import numpy as np
 
-import pitch
-from video_io import FrameReader
+from . import pitch
+from .video_io import FrameReader
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+DATA_DIR = "data"
 PREVIEW_WIDTH = 1280
 
 
@@ -82,7 +83,12 @@ def main():
     out_json = os.path.join(data_dir, f"{name}_keyframes.json")
 
     # 既存のキーフレームがあれば読み込んで追記する
-    doc = {"video": args.video, "pitch_length": pitch.DEFAULT_LENGTH, "pitch_width": pitch.DEFAULT_WIDTH, "keyframes": []}
+    doc = {
+        "video": args.video,
+        "pitch_length": pitch.DEFAULT_LENGTH,
+        "pitch_width": pitch.DEFAULT_WIDTH,
+        "keyframes": [],
+    }
     if os.path.exists(out_json):
         with open(out_json, encoding="utf-8") as f:
             doc = json.load(f)
@@ -150,7 +156,7 @@ def main():
     def render():
         img = st["img"].copy()
         s = st["scale"]
-        for i, (k, jp, xy) in enumerate(KP):
+        for i, (k, _jp, _xy) in enumerate(KP):
             if k not in st["pts"]:
                 continue
             x, y = int(st["pts"][k][0] * s), int(st["pts"][k][1] * s)
@@ -159,8 +165,10 @@ def main():
             cv2.putText(img, str(i + 1), (x + 7, y - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
             cv2.putText(img, str(i + 1), (x + 7, y - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 1)
         kfs = [k["frame"] for k in doc["keyframes"]]
-        msg = (f"frame {st['frame']} ({st['frame'] / reader.fps:.2f}s)  points {len(st['pts'])}  "
-               f"target #{st['cur'] + 1}  keyframes {kfs}")
+        msg = (
+            f"frame {st['frame']} ({st['frame'] / reader.fps:.2f}s)  points {len(st['pts'])}  "
+            f"target #{st['cur'] + 1}  keyframes {kfs}"
+        )
         cv2.rectangle(img, (0, 0), (img.shape[1], 26), (40, 40, 40), -1)
         cv2.putText(img, msg, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
         return img
@@ -174,13 +182,24 @@ def main():
             continue
         if k in (ord("q"), 27):
             break
-        nav = {ord("a"): -1, ord("d"): 1, ord("j"): -fps_i, ord("l"): fps_i, ord("u"): -10 * fps_i, ord("i"): 10 * fps_i}
+        nav = {
+            ord("a"): -1,
+            ord("d"): 1,
+            ord("j"): -fps_i,
+            ord("l"): fps_i,
+            ord("u"): -10 * fps_i,
+            ord("i"): 10 * fps_i,
+        }
         if k in nav:
             load(st["frame"] + nav[k])
         elif k == ord("n"):
-            st["cur"] = (st["cur"] + 1) % len(KP); st["dirty"] = True; announce()
+            st["cur"] = (st["cur"] + 1) % len(KP)
+            st["dirty"] = True
+            announce()
         elif k == ord("p"):
-            st["cur"] = (st["cur"] - 1) % len(KP); st["dirty"] = True; announce()
+            st["cur"] = (st["cur"] - 1) % len(KP)
+            st["dirty"] = True
+            announce()
         elif k == ord("g"):
             for i, (key, jp, _) in enumerate(KP):
                 print(f"  {i + 1:2d}: {jp}{'（済）' if key in st['pts'] else ''}")
@@ -192,15 +211,22 @@ def main():
             st["dirty"] = True
             announce()
         elif k == ord("x"):
-            st["pts"].pop(KP[st["cur"]][0], None); st["saved"] = False; st["dirty"] = True
+            st["pts"].pop(KP[st["cur"]][0], None)
+            st["saved"] = False
+            st["dirty"] = True
         elif k == ord("r"):
-            st["pts"] = {}; st["saved"] = False; st["dirty"] = True
+            st["pts"] = {}
+            st["saved"] = False
+            st["dirty"] = True
         elif k == ord("k"):
             for kf in doc["keyframes"]:
                 print(f"  フレーム {kf['frame']}（{kf['frame'] / reader.fps:.2f} 秒）: {len(kf['points'])} 点")
         elif k in (13, 10):
-            points = [{"key": key, "name": jp, "pitch": list(xy), "image": st["pts"][key]}
-                      for key, jp, xy in KP if key in st["pts"]]
+            points = [
+                {"key": key, "name": jp, "pitch": list(xy), "image": st["pts"][key]}
+                for key, jp, xy in KP
+                if key in st["pts"]
+            ]
             print(f"フレーム {st['frame']}: {len(points)} 点")
             if len(points) < 4:
                 print("  4点以上必要です。")

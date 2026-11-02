@@ -4,9 +4,9 @@
 初期値として、位置合わせの結果（<動画名>_homography.npz）か、学習済みモデルの推論結果を表示するので、
 ずれている点をドラッグで直し、見えていない点を消し、足りない点を足すだけでよい。
 
-使い方（src/ で実行）:
-  uv run python -m kp.annotate video3.mov --every 15
-  uv run python -m kp.annotate video3.mov --every 15 --kp-model ../models/pitch_kp/best.pt
+使い方（リポジトリの直下で実行）:
+  uv run python -m soccer_tracking.kp.annotate video3.mov --every 15
+  uv run python -m soccer_tracking.kp.annotate video3.mov --every 15 --kp-model models/pitch_kp/best.pt
 
 操作:
   ドラッグ        点を動かす（点の近くを押して動かす）
@@ -21,18 +21,17 @@
 
 出力: data/<動画名>_kp/ に画像と index.json（kp.train の --extra に渡す）
 """
+
 import argparse
 import json
 import os
-import sys
 
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import pitch  # noqa: E402
+from .. import pitch
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data")
+DATA_DIR = "data"
 PREVIEW_WIDTH = 1280
 PICK_RADIUS = 10
 
@@ -59,7 +58,8 @@ def main():
     KEYS = [k for k, _, _ in KP]
     detector = None
     if reg is None and args.kp_model:
-        from kp.detect import KeypointDetector
+        from .detect import KeypointDetector
+
         detector = KeypointDetector(args.kp_model)
     print(f"初期値: {'位置合わせの結果' if reg is not None else ('モデルの推論' if detector else 'なし')}")
 
@@ -104,7 +104,7 @@ def main():
 
     def save():
         items = []
-        for fi, p in frames:
+        for _fi, p in frames:
             if p in ann and ann[p]:
                 img_h, img_w = st["shape"]
                 items.append({"image": p, "width": img_w, "height": img_h, "keypoints": ann[p]})
@@ -182,8 +182,15 @@ def main():
             cv2.putText(img, str(i + 1), (int(u * s) + 6, int(v * s) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
             cv2.putText(img, str(i + 1), (int(u * s) + 6, int(v * s) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
         cv2.rectangle(img, (0, 0), (img.shape[1], 24), (40, 40, 40), -1)
-        cv2.putText(img, f"{st['i'] + 1}/{len(frames)}  points {len(P)}  next #{st['cur'] + 1}",
-                    (8, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+        cv2.putText(
+            img,
+            f"{st['i'] + 1}/{len(frames)}  points {len(P)}  next #{st['cur'] + 1}",
+            (8, 17),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            1,
+        )
         cv2.imshow(win, img)
         k = cv2.waitKey(20) & 0xFF
         if k == 255:
@@ -192,15 +199,19 @@ def main():
             save()
             break
         if k == ord("a"):
-            save(); load(st["i"] - 1)
+            save()
+            load(st["i"] - 1)
         elif k == ord("d"):
-            save(); load(st["i"] + 1)
+            save()
+            load(st["i"] + 1)
         elif k == ord("s"):
             save()
         elif k == ord("n"):
-            st["cur"] = (st["cur"] + 1) % len(KEYS); print(f"  置く目印: [{st['cur'] + 1}] {KP[st['cur']][1]}")
+            st["cur"] = (st["cur"] + 1) % len(KEYS)
+            print(f"  置く目印: [{st['cur'] + 1}] {KP[st['cur']][1]}")
         elif k == ord("p"):
-            st["cur"] = (st["cur"] - 1) % len(KEYS); print(f"  置く目印: [{st['cur'] + 1}] {KP[st['cur']][1]}")
+            st["cur"] = (st["cur"] - 1) % len(KEYS)
+            print(f"  置く目印: [{st['cur'] + 1}] {KP[st['cur']][1]}")
         elif k == ord("g"):
             for i, (kk, jp, _) in enumerate(KP):
                 print(f"  {i + 1:2d}: {jp}{'（済）' if kk in P else ''}")
@@ -210,7 +221,8 @@ def main():
                 pass
             print(f"  置く目印: [{st['cur'] + 1}] {KP[st['cur']][1]}")
         elif k == ord("x") and st["last"] in P:
-            P.pop(st["last"]); st["last"] = None
+            P.pop(st["last"])
+            st["last"] = None
         elif k == ord("c"):
             P.clear()
         elif k == ord("l"):

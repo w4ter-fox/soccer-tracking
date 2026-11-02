@@ -1,12 +1,15 @@
-"""動画のフレーム単位の読み込み
+"""動画の読み込み（フレーム番号を正確にそろえる）と書き出し（H.264）
 
 OpenCV のシーク（CAP_PROP_POS_FRAMES）はコーデックや可変フレームレートの動画で位置がずれることがあるので、
 先頭から順に読み、track.py（supervision の get_video_frames_generator）と同じフレーム番号になるようにする。
 """
+
 import os
+import subprocess
 from collections import OrderedDict
 
 import cv2
+import numpy as np
 
 
 class FrameReader:
@@ -48,3 +51,49 @@ class FrameReader:
         if len(self.cache) > self.cache_size:
             self.cache.popitem(last=False)
         return frame
+
+
+class FFmpegWriter:
+    """OpenCVのmp4vより高画質なH.264で書き出す（Drive上でもプレビュー再生できる）"""
+
+    def __init__(self, path, width, height, fps, crf=18):
+        self.proc = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "bgr24",
+                "-s",
+                f"{width}x{height}",
+                "-r",
+                str(fps),
+                "-i",
+                "-",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                str(crf),
+                "-pix_fmt",
+                "yuv420p",
+                path,
+            ],
+            stdin=subprocess.PIPE,
+        )
+
+    def write_frame(self, frame):
+        self.proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.proc.stdin.close()
+        self.proc.wait()

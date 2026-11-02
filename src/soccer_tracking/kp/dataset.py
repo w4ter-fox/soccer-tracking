@@ -1,15 +1,13 @@
 """学習データの読み込みと拡張（convert_soccernet.py の index_<split>.json を読む）"""
+
 import json
-import os
-import sys
 
 import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import pitch  # noqa: E402
+from .. import pitch
 
 KEYS = [k for k, _, _ in pitch.keypoints()]
 
@@ -40,7 +38,7 @@ def gaussian_heatmaps(points, valid, out_w, out_h, sigma):
             continue
         xs = np.arange(x0, x1)[None, :]
         ys = np.arange(y0, y1)[:, None]
-        g = np.exp(-((xs - x) ** 2 + (ys - y) ** 2) / (2 * sigma ** 2))
+        g = np.exp(-((xs - x) ** 2 + (ys - y) ** 2) / (2 * sigma**2))
         hm[i, y0:y1, x0:x1] = np.maximum(hm[i, y0:y1, x0:x1], g)
         if 0 <= cx < out_w and 0 <= cy < out_h:
             hm[i, cy, cx] = 1.0
@@ -69,7 +67,7 @@ class PitchKeypointDataset(Dataset):
         if rng.random() < 0.4:
             k = int(rng.choice([3, 5]))
             img = cv2.GaussianBlur(img, (k, k), 0)
-        if rng.random() < 0.3:   # 動きブレ
+        if rng.random() < 0.3:  # 動きブレ
             k = int(rng.integers(3, 9))
             ker = np.zeros((k, k), np.float32)
             ker[k // 2, :] = 1.0 / k
@@ -106,7 +104,7 @@ class PitchKeypointDataset(Dataset):
         img = cv2.warpAffine(img, M, (self.in_w, self.in_h), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
         pts = (np.c_[pts, np.ones(len(pts))] @ M.T).astype(np.float32)
 
-        if self.augment and rng.random() < 0.5:   # 左右反転（キーポイントの左右も入れ替える）
+        if self.augment and rng.random() < 0.5:  # 左右反転（キーポイントの左右も入れ替える）
             img = img[:, ::-1].copy()
             pts[:, 0] = self.in_w - 1 - pts[:, 0]
             pts, valid = pts[FLIP_INDEX], valid[FLIP_INDEX]
@@ -118,5 +116,7 @@ class PitchKeypointDataset(Dataset):
         hm = gaussian_heatmaps(pts / self.stride, valid, ow, oh, self.sigma)
 
         x = torch.from_numpy(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).transpose(2, 0, 1).copy()).float() / 255.0
-        x = (x - torch.tensor([0.485, 0.456, 0.406])[:, None, None]) / torch.tensor([0.229, 0.224, 0.225])[:, None, None]
+        x = (x - torch.tensor([0.485, 0.456, 0.406])[:, None, None]) / torch.tensor([0.229, 0.224, 0.225])[
+            :, None, None
+        ]
         return x, torch.from_numpy(hm.astype(np.float16)), torch.from_numpy(pts), torch.from_numpy(valid)

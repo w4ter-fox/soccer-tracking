@@ -4,16 +4,17 @@
 mplsoccer の pitch_type="custom" と同じ向き（左下が原点）。
 ピッチの長さ・幅は会場ごとに違うので引数で受け取り、ペナルティエリアなどの寸法は規格の値を使う。
 """
+
 import numpy as np
 
-PA_DEPTH = 16.5      # ペナルティエリアの奥行き
-PA_HALF = 20.16      # ペナルティエリアの幅の半分（40.32 / 2）
-GA_DEPTH = 5.5       # ゴールエリアの奥行き
-GA_HALF = 9.16       # ゴールエリアの幅の半分（18.32 / 2）
-GOAL_HALF = 3.66     # ゴールの幅の半分（7.32 / 2）
-CIRCLE_R = 9.15      # センターサークルとペナルティアークの半径
-SPOT_DIST = 11.0     # ゴールラインからペナルティマークまで
-ARC_DY = float(np.sqrt(CIRCLE_R ** 2 - (PA_DEPTH - SPOT_DIST) ** 2))  # ペナルティアークとPAラインの交点の、中央からのずれ
+PA_DEPTH = 16.5  # ペナルティエリアの奥行き
+PA_HALF = 20.16  # ペナルティエリアの幅の半分（40.32 / 2）
+GA_DEPTH = 5.5  # ゴールエリアの奥行き
+GA_HALF = 9.16  # ゴールエリアの幅の半分（18.32 / 2）
+GOAL_HALF = 3.66  # ゴールの幅の半分（7.32 / 2）
+CIRCLE_R = 9.15  # センターサークルとペナルティアークの半径
+SPOT_DIST = 11.0  # ゴールラインからペナルティマークまで
+ARC_DY = float(np.sqrt(CIRCLE_R**2 - (PA_DEPTH - SPOT_DIST) ** 2))  # ペナルティアークとPAラインの交点の、中央からのずれ
 
 DEFAULT_LENGTH = 105.0
 DEFAULT_WIDTH = 68.0
@@ -61,20 +62,38 @@ def line_segments(L=DEFAULT_LENGTH, W=DEFAULT_WIDTH):
     """白線を折れ線の集まりとして返す [(points, weight), ...]"""
     c = W / 2
     segs = [
-        ([(0, 0), (L, 0)], 1.0),                       # 手前のタッチライン
-        ([(0, W), (L, W)], 1.0),                       # 奥のタッチライン
-        ([(0, 0), (0, W)], 1.0),                       # 左のゴールライン
-        ([(L, 0), (L, W)], 1.0),                       # 右のゴールライン
-        ([(L / 2, 0), (L / 2, W)], 1.0),               # ハーフウェイライン
+        ([(0, 0), (L, 0)], 1.0),  # 手前のタッチライン
+        ([(0, W), (L, W)], 1.0),  # 奥のタッチライン
+        ([(0, 0), (0, W)], 1.0),  # 左のゴールライン
+        ([(L, 0), (L, W)], 1.0),  # 右のゴールライン
+        ([(L / 2, 0), (L / 2, W)], 1.0),  # ハーフウェイライン
     ]
     t = np.linspace(0, 2 * np.pi, 90)
-    segs.append((list(zip(L / 2 + CIRCLE_R * np.cos(t), c + CIRCLE_R * np.sin(t))), 1.0))   # センターサークル
+    segs.append((list(zip(L / 2 + CIRCLE_R * np.cos(t), c + CIRCLE_R * np.sin(t))), 1.0))  # センターサークル
     th = np.arccos((PA_DEPTH - SPOT_DIST) / CIRCLE_R)
     for x0, s in [(0.0, 1.0), (L, -1.0)]:
-        segs.append(([(x0, c - PA_HALF), (x0 + s * PA_DEPTH, c - PA_HALF),
-                      (x0 + s * PA_DEPTH, c + PA_HALF), (x0, c + PA_HALF)], 1.0))            # PA
-        segs.append(([(x0, c - GA_HALF), (x0 + s * GA_DEPTH, c - GA_HALF),
-                      (x0 + s * GA_DEPTH, c + GA_HALF), (x0, c + GA_HALF)], 1.0))            # ゴールエリア
+        segs.append(
+            (
+                [
+                    (x0, c - PA_HALF),
+                    (x0 + s * PA_DEPTH, c - PA_HALF),
+                    (x0 + s * PA_DEPTH, c + PA_HALF),
+                    (x0, c + PA_HALF),
+                ],
+                1.0,
+            )
+        )  # PA
+        segs.append(
+            (
+                [
+                    (x0, c - GA_HALF),
+                    (x0 + s * GA_DEPTH, c - GA_HALF),
+                    (x0 + s * GA_DEPTH, c + GA_HALF),
+                    (x0, c + GA_HALF),
+                ],
+                1.0,
+            )
+        )  # ゴールエリア
         base = 0.0 if s > 0 else np.pi
         t = np.linspace(base - th, base + th, 30)
         segs.append((list(zip(x0 + s * SPOT_DIST + CIRCLE_R * np.cos(t), c + CIRCLE_R * np.sin(t))), 1.0))  # PAアーク

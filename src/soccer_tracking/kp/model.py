@@ -5,6 +5,7 @@
 手がかりになるので、位置情報を保ったまま注意をかけられる CA と相性がよい。
 出力は入力の 1/4 解像度のヒートマップ（キーポイントの数だけチャンネル）。
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,8 +32,8 @@ class CoordAtt(nn.Module):
 
     def forward(self, x):
         n, c, h, w = x.shape
-        xh = x.mean(dim=3, keepdim=True)                       # (n, c, h, 1)
-        xw = x.mean(dim=2, keepdim=True).permute(0, 1, 3, 2)   # (n, c, w, 1)
+        xh = x.mean(dim=3, keepdim=True)  # (n, c, h, 1)
+        xw = x.mean(dim=2, keepdim=True).permute(0, 1, 3, 2)  # (n, c, w, 1)
         y = self.act(self.bn(self.conv1(torch.cat([xh, xw], dim=2))))
         yh, yw = torch.split(y, [h, w], dim=2)
         ah = torch.sigmoid(self.conv_h(yh))
@@ -41,7 +42,9 @@ class CoordAtt(nn.Module):
 
 
 def conv_bn(cin, cout, k=3):
-    return nn.Sequential(nn.Conv2d(cin, cout, k, padding=k // 2, bias=False), nn.BatchNorm2d(cout), nn.ReLU(inplace=True))
+    return nn.Sequential(
+        nn.Conv2d(cin, cout, k, padding=k // 2, bias=False), nn.BatchNorm2d(cout), nn.ReLU(inplace=True)
+    )
 
 
 class UpBlock(nn.Module):
@@ -61,9 +64,9 @@ class PitchKeypointNet(nn.Module):
         fn, self.taps, chs = ENCODERS[encoder]
         self.encoder = fn(weights=None).features
         self.reduce = nn.Sequential(conv_bn(chs[3], width * 4, 1), CoordAtt(width * 4) if use_ca else nn.Identity())
-        self.up3 = UpBlock(width * 4, chs[2], width * 2, use_ca)   # → stride 16
-        self.up2 = UpBlock(width * 2, chs[1], width, use_ca)       # → stride 8
-        self.up1 = UpBlock(width, chs[0], width, use_ca)           # → stride 4
+        self.up3 = UpBlock(width * 4, chs[2], width * 2, use_ca)  # → stride 16
+        self.up2 = UpBlock(width * 2, chs[1], width, use_ca)  # → stride 8
+        self.up1 = UpBlock(width, chs[0], width, use_ca)  # → stride 4
         self.head = nn.Sequential(conv_bn(width, width), nn.Conv2d(width, num_kp, 1))
         # 出力の初期値を「ほぼ0」（sigmoid で 0.01）にして、学習の最初が安定するようにする
         nn.init.constant_(self.head[-1].bias, -4.6)
@@ -79,7 +82,7 @@ class PitchKeypointNet(nn.Module):
         y = self.up3(y, s16)
         y = self.up2(y, s8)
         y = self.up1(y, s4)
-        return self.head(y)            # ロジット（sigmoid 前）
+        return self.head(y)  # ロジット（sigmoid 前）
 
 
 def focal_loss(logits, target, alpha=2, beta=4):
@@ -88,6 +91,6 @@ def focal_loss(logits, target, alpha=2, beta=4):
     pos = target.eq(1).float()
     neg = 1 - pos
     pos_loss = torch.log(pred) * (1 - pred) ** alpha * pos
-    neg_loss = torch.log(1 - pred) * pred ** alpha * (1 - target) ** beta * neg
+    neg_loss = torch.log(1 - pred) * pred**alpha * (1 - target) ** beta * neg
     n_pos = pos.sum()
     return -(pos_loss.sum() + neg_loss.sum()) / n_pos.clamp(min=1)

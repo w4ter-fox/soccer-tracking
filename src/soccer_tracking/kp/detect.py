@@ -1,16 +1,11 @@
 """学習済みモデルでフレームからキーポイントを推定し、ホモグラフィを求める"""
-import json
-import os
-import sys
 
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import pitch  # noqa: E402
-from kp.model import PitchKeypointNet  # noqa: E402
+from .. import pitch
+from .model import PitchKeypointNet
 
 
 class KeypointDetector:
@@ -33,7 +28,7 @@ class KeypointDetector:
         img = cv2.cvtColor(cv2.resize(frame, (iw, ih), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
         x = torch.from_numpy(img).to(self.device).permute(2, 0, 1).float() / 255.0
         x = ((x - self.mean) / self.std)[None]
-        hm = torch.sigmoid(self.model(x))[0]                     # (K, oh, ow)
+        hm = torch.sigmoid(self.model(x))[0]  # (K, oh, ow)
         K, oh, ow = hm.shape
         flat = hm.view(K, -1)
         score, idx = flat.max(dim=1)
