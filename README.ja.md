@@ -1,5 +1,7 @@
 # サッカー映像のトラッキングとピッチの2D化
 
+[![CI](https://github.com/w4ter-fox/soccer-tracking/actions/workflows/ci.yml/badge.svg)](https://github.com/w4ter-fox/soccer-tracking/actions/workflows/ci.yml)
+
 スマホで撮ったサッカーの試合映像から、選手・審判・ボールを追跡し、ピッチの位置合わせをして全選手を実寸（メートル）の2Dピッチに配置する。カメラがセンターサークルからゴール前へパンする映像でも、手動の点取りなしで位置合わせできる。
 
 <p align="center">
@@ -40,8 +42,8 @@ uv run python -c "import torch; print(torch.cuda.is_available())"
 ## 使い方
 
 ```bash
-uv run python src/track.py video3.mov --slowdown 4 --kp-model models/pitch_kp/best.pt
-uv run python src/visualize.py video3.mov
+uv run soccer-track video3.mov --slowdown 4 --kp-model models/pitch_kp/best.pt
+uv run soccer-visualize video3.mov
 ```
 
 | 出力（`data/`） | 内容 |
@@ -53,37 +55,52 @@ uv run python src/visualize.py video3.mov
 | `<名前>_2d.mp4` | 2Dピッチ上の選手の動き |
 
 - `--slowdown 4`：入力が 4 倍のスローの場合（iPhone のスロー撮影など）。時間に関する設定を実時間に合わせる。
-- `src/track.py` 冒頭の `JERSEY_COLORS`：チーム・審判・GK のユニフォームの色（HSV の範囲）。
-- 位置合わせの確認：`uv run python src/register.py video3.mov --kp-model models/pitch_kp/best.pt --debug-video` で、投影したピッチの白線を重ねた `<名前>_registration.mp4` が出る。
-- モデルがない場合は `uv run python src/pick_keyframes.py video3.mov` で数フレームの目印を手でクリックする。
+- `src/soccer_tracking/config.py`：調整できる値（`Config`）とユニフォームの色（`DEFAULT_JERSEY_COLORS`）。
+- 位置合わせの確認：`uv run soccer-register video3.mov --kp-model models/pitch_kp/best.pt --debug-video` で、投影したピッチの白線を重ねた `<名前>_registration.mp4` が出る。
+- モデルがない場合は `uv run soccer-keyframes video3.mov` で数フレームの目印を手でクリックする。
 
 ## キーポイント検出モデルの学習
 
 ```bash
-cd src
 uv run --with SoccerNet python -c "from SoccerNet.Downloader import SoccerNetDownloader as D; D(LocalDirectory='$HOME/data/soccernet').downloadDataTask(task='calibration-2023', split=['train','valid','test'])"
-uv run python -m kp.convert_soccernet --soccernet ~/data/soccernet/calibration-2023 --out ~/data/sn_keypoints
-uv run python -m kp.train --data ~/data/sn_keypoints --out ../models/pitch_kp --workers 4
+uv run python -m soccer_tracking.kp.convert_soccernet --soccernet ~/data/soccernet/calibration-2023 --out ~/data/sn_keypoints
+uv run python -m soccer_tracking.kp.train --data ~/data/sn_keypoints --out models/pitch_kp --workers 4
 ```
 
 SoccerNet-Calibration の注釈は白線上の点で、キーポイントそのものはない。`kp/convert_soccernet.py` は、白線の交点と白線そのものの対応から画像ごとにホモグラフィを求め（正規化 DLT）、交点が少ないセンター付近の画角ではサークルの中心と左右端を幾何学的に求め、全注釈点に当てはめ直してから37個の目印を投影する。メインカメラ以外の画角など、約半数の画像は除外される。
 
-自分の映像で追加学習するときは、`kp/annotate.py` で位置合わせの結果を初期値にして点を直し、`kp/train.py --extra ... --init ...` で混ぜて学習する。
+自分の映像で追加学習するときは、`soccer_tracking.kp.annotate` で位置合わせの結果を初期値にして点を直し、`soccer_tracking.kp.train --extra ... --init ...` で混ぜて学習する。
 
 ## 構成
 
 ```
-src/
-├── track.py              検出・追跡・つなぎ直し・チーム判定・ボールの経路・2D座標の出力
-├── register.py           全フレームの位置合わせ
-├── visualize.py          2Dピッチの描画
-├── pitch.py              ピッチのモデル（メートル座標、目印と白線）
-├── pick_keyframes.py     手動のキーフレーム指定（任意）
-├── video_io.py           フレーム番号を正確にそろえる動画の読み込み
-├── kp/                   ピッチのキーポイント検出
-└── legacy/               以前の片側ゴールだけの位置合わせ
-scripts/make_demo.py      README の GIF（docs/media）を作る
+src/soccer_tracking/
+├── track.py          全体の流れ：検出 → 追跡 → つなぎ直し → チーム → ボール → 出力（コマンド: soccer-track）
+├── registration.py   全フレームの位置合わせ（コマンド: soccer-register）
+├── visualize.py      2Dピッチの描画（コマンド: soccer-visualize）
+├── keyframes.py      手動のキーフレーム指定、任意（コマンド: soccer-keyframes）
+├── config.py         調整できる値とクラスID
+├── ball.py           ボールの候補、動的計画法による経路選択、弾道フィット
+├── linking.py        速度の外挿による途切れたトラックのつなぎ直し
+├── teams.py          トラック単位のチームの決定
+├── jersey.py         ユニフォームの色の判定
+├── vision.py         ピッチの領域、白線、カメラの動き、カット検出
+├── video_io.py       フレーム番号を正確にそろえる読み込みと H.264 の書き出し
+├── pitch.py          ピッチのモデル（メートル座標、目印と白線）
+└── kp/               ピッチのキーポイント検出（変換・モデル・データ・学習・推論・アノテーション）
+tests/                pytest のテスト（CPU だけで動き、GitHub Actions で実行）
+scripts/make_demo.py  README の GIF（docs/media）を作る
 ```
+
+## 開発
+
+```bash
+uv sync --group dev
+uv run pytest
+uv run ruff check src tests scripts
+```
+
+テストは合成データ（描画したピッチの白線、走る選手とボールの軌道のシミュレーション、SoccerNet 形式の注釈）を使うので、GPU や動画なしで動く。
 
 ## 制約
 

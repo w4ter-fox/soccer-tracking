@@ -1,5 +1,7 @@
 # Soccer Tracking & Pitch Registration
 
+[![CI](https://github.com/w4ter-fox/soccer-tracking/actions/workflows/ci.yml/badge.svg)](https://github.com/w4ter-fox/soccer-tracking/actions/workflows/ci.yml)
+
 Player, referee and ball tracking for amateur soccer footage, with automatic pitch registration that maps every player onto a metric 2D pitch — even when the camera pans from the center circle to the goal.
 
 <p align="center">
@@ -68,8 +70,8 @@ Put videos in `data/` (copy them into the Linux filesystem; reading from `/mnt/c
 Track players and the ball, register the pitch automatically, and export 2D positions:
 
 ```bash
-uv run python src/track.py video3.mov --slowdown 4 --kp-model models/pitch_kp/best.pt
-uv run python src/visualize.py video3.mov
+uv run soccer-track video3.mov --slowdown 4 --kp-model models/pitch_kp/best.pt
+uv run soccer-visualize video3.mov
 ```
 
 Outputs in `data/`:
@@ -85,43 +87,52 @@ Outputs in `data/`:
 Useful options:
 
 - `--slowdown 4` — the input is slowed down 4× (e.g. iPhone slow motion). Time-based parameters are scaled accordingly.
-- `JERSEY_COLORS` at the top of `src/track.py` — HSV ranges for each team, the referee and goalkeepers.
-- `uv run python src/register.py video3.mov --kp-model models/pitch_kp/best.pt --debug-video` — writes `<name>_registration.mp4` with the projected pitch lines, to check the registration.
-- `uv run python src/pick_keyframes.py video3.mov` — click landmarks manually on a few frames if no model is available.
+- `src/soccer_tracking/config.py` — all tunable parameters (`Config`) and the jersey HSV ranges (`DEFAULT_JERSEY_COLORS`).
+- `uv run soccer-register video3.mov --kp-model models/pitch_kp/best.pt --debug-video` — writes `<name>_registration.mp4` with the projected pitch lines, to check the registration.
+- `uv run soccer-keyframes video3.mov` — click landmarks manually on a few frames if no model is available.
 
 ## Training the keypoint detector
 
 ```bash
-cd src
 uv run --with SoccerNet python -c "from SoccerNet.Downloader import SoccerNetDownloader as D; D(LocalDirectory='$HOME/data/soccernet').downloadDataTask(task='calibration-2023', split=['train','valid','test'])"
-uv run python -m kp.convert_soccernet --soccernet ~/data/soccernet/calibration-2023 --out ~/data/sn_keypoints
-uv run python -m kp.train --data ~/data/sn_keypoints --out ../models/pitch_kp --workers 4
+uv run python -m soccer_tracking.kp.convert_soccernet --soccernet ~/data/soccernet/calibration-2023 --out ~/data/sn_keypoints
+uv run python -m soccer_tracking.kp.train --data ~/data/sn_keypoints --out models/pitch_kp --workers 4
 ```
 
 SoccerNet-Calibration annotates line points, not keypoints. `kp/convert_soccernet.py` fits a homography per image from line intersections and line correspondences (normalized DLT), recovers center-circle landmarks geometrically when few intersections are visible, refines against every annotated point, and projects the 37 landmarks. About half of the images (non-main-camera views) are rejected.
 
-To fine-tune on your own footage, `kp/annotate.py` pre-fills landmarks from the registration so you only correct them, and `kp/train.py --extra ... --init ...` mixes them into training.
+To fine-tune on your own footage, `soccer_tracking.kp.annotate` pre-fills landmarks from the registration so you only correct them, and `soccer_tracking.kp.train --extra ... --init ...` mixes them into training.
 
 ## Project structure
 
 ```
-src/
-├── track.py              detection, tracking, re-linking, team vote, ball path, 2D export
-├── register.py           per-frame pitch registration
-├── visualize.py          2D pitch rendering
-├── pitch.py              pitch model in meters (landmarks and lines)
-├── pick_keyframes.py     manual keyframes (optional)
-├── video_io.py           frame-accurate video reader
-├── kp/                   pitch keypoint detector
-│   ├── convert_soccernet.py
-│   ├── model.py          MobileNetV3 U-Net + Coordinate Attention
-│   ├── dataset.py        augmentation (flip with left/right swap, blur, JPEG, noise)
-│   ├── train.py
-│   ├── detect.py
-│   └── annotate.py
-└── legacy/               earlier single-goal registration
-scripts/make_demo.py      builds the GIFs in docs/media
+src/soccer_tracking/
+├── track.py          pipeline: detection → tracking → re-linking → teams → ball → outputs (CLI: soccer-track)
+├── registration.py   per-frame pitch registration (CLI: soccer-register)
+├── visualize.py      2D pitch rendering (CLI: soccer-visualize)
+├── keyframes.py      manual keyframes, optional (CLI: soccer-keyframes)
+├── config.py         all tunable parameters and class IDs
+├── ball.py           ball candidates, DP path selection, ballistic fit
+├── linking.py        tracklet re-linking by velocity extrapolation
+├── teams.py          per-track team decision
+├── jersey.py         jersey color classification
+├── vision.py         pitch mask, white lines, camera motion, scene cuts
+├── video_io.py       frame-accurate reader and H.264 writer
+├── pitch.py          pitch model in meters (landmarks and lines)
+└── kp/               pitch keypoint detector (convert, model, dataset, train, detect, annotate)
+tests/                pytest suite (CPU only; runs in GitHub Actions)
+scripts/make_demo.py  builds the GIFs in docs/media
 ```
+
+## Development
+
+```bash
+uv sync --group dev
+uv run pytest
+uv run ruff check src tests scripts
+```
+
+The tests use synthetic data (rendered pitch lines, simulated runners and ball trajectories, SoccerNet-style line annotations), so they run without a GPU or video files.
 
 ## Limitations
 

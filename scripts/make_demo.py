@@ -10,6 +10,7 @@ track.py の出力（入力と同じ速度）はフレーム番号が元動画�
   uv run python scripts/make_demo.py video3.mov
   uv run python scripts/make_demo.py video3.mov --start 200 --frames 180 --width 960 --fps 12
 """
+
 import argparse
 import os
 import shutil
@@ -49,20 +50,57 @@ def to_gif(frames, out_path, fps, width):
     try:
         mp4 = os.path.join(tmp, "clip.mp4")
         proc = subprocess.Popen(
-            ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
-             "-r", str(fps), "-i", "-", "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", mp4],
-            stdin=subprocess.PIPE)
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "bgr24",
+                "-s",
+                f"{w}x{h}",
+                "-r",
+                str(fps),
+                "-i",
+                "-",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "16",
+                "-pix_fmt",
+                "yuv420p",
+                mp4,
+            ],
+            stdin=subprocess.PIPE,
+        )
         for f in frames:
             proc.stdin.write(np.ascontiguousarray(f).tobytes())
         proc.stdin.close()
         proc.wait()
         palette = os.path.join(tmp, "palette.png")
         scale = f"fps={fps},scale={width}:-1:flags=lanczos"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp4, "-vf", f"{scale},palettegen=stats_mode=diff",
-                        palette], check=True)
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp4, "-i", palette, "-lavfi",
-                        f"{scale} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
-                        out_path], check=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", mp4, "-vf", f"{scale},palettegen=stats_mode=diff", palette],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                mp4,
+                "-i",
+                palette,
+                "-lavfi",
+                f"{scale} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
+                out_path,
+            ],
+            check=True,
+        )
     finally:
         shutil.rmtree(tmp)
     print(f"保存: {out_path}（{os.path.getsize(out_path) / 1e6:.1f} MB）")
@@ -83,7 +121,9 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     name = os.path.splitext(args.video)[0]
     src = read_frames(os.path.join(args.data_dir, args.video), args.start, args.frames // args.step, args.step)
-    trk = read_frames(os.path.join(args.data_dir, f"{name}_tracking.mp4"), args.start, args.frames // args.step, args.step)
+    trk = read_frames(
+        os.path.join(args.data_dir, f"{name}_tracking.mp4"), args.start, args.frames // args.step, args.step
+    )
     n = min(len(src), len(trk))
     if n == 0:
         raise SystemExit("フレームを読めませんでした。元動画と _tracking.mp4 が data/ にあるか確認してください。")
