@@ -6,4 +6,6 @@ __pycache__/
 *.pyc
 *.pt
 .ruff_cache/
+.pytest_cache/
+*.egg-info/
 *:Zone.Identifier
